@@ -1,0 +1,98 @@
+--- a/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
+@@ -522,12 +522,6 @@
+     }
+     wgpu::RenderPassEncoder& pass = scheduler.RenderPass(targets);
+     scheduler.TrackPassUsage(written_buffers, read_buffers);
+-    if (targets.colors[0] && targets.width >= 640) {
+-        debug_last_target = targets.colors[0];
+-        debug_last_width = targets.width;
+-        debug_last_height = targets.height;
+-        ++debug_last_serial;
+-    }
+     pass.SetPipeline(pipeline->render_pipeline);
+     pass.SetBindGroup(0, bind_group);
+     pass.SetBindGroup(1, draw_info_group, 1, &draw_offset);
+@@ -1002,11 +996,10 @@
+     static u32 debug_logs = 0;
+     if (debug_logs < 30) {
+         ++debug_logs;
+-        LOG_INFO(Render, "AccelerateDisplay #{}: fb={:#x} fmt {} {}x{} hit {} size {}x{} (blit_tgt={} draw_tgt={})",
++        LOG_INFO(Render, "AccelerateDisplay #{}: fb={:#x} fmt {} {}x{} hit {} size {}x{}",
+                  debug_logs, framebuffer_addr, static_cast<u32>(config.pixel_format),
+                  config.width, config.height, image_view != nullptr,
+-                 image_view ? image_view->size.width : 0, image_view ? image_view->size.height : 0,
+-                 texture_cache_runtime.last_blit_target != nullptr, debug_last_target != nullptr);
++                 image_view ? image_view->size.width : 0, image_view ? image_view->size.height : 0);
+     }
+     if (image_view) {
+         width = image_view->size.width;
+@@ -1015,25 +1008,6 @@
+         return image_view->Handle(Shader::TextureType::Color2D);
+     }
+
+-    if (texture_cache_runtime.last_blit_target) {
+-        static u32 blit_disp_logs = 0;
+-        if (blit_disp_logs++ < 10) {
+-            LOG_INFO(Render, "AccelerateDisplay: returning last_blit_target {}x{} (serial {})",
+-                     texture_cache_runtime.last_blit_width, texture_cache_runtime.last_blit_height,
+-                     texture_cache_runtime.last_blit_serial);
+-        }
+-        width = texture_cache_runtime.last_blit_width;
+-        height = texture_cache_runtime.last_blit_height;
+-        ++stats.display_hits;
+-        return texture_cache_runtime.last_blit_target;
+-    }
+-    if (debug_last_target) {
+-        width = debug_last_width;
+-        height = debug_last_height;
+-        ++stats.display_hits;
+-        return debug_last_target;
+-    }
+-
+     ++stats.display_misses;
+     return {};
+ }
+--- a/src/video_core/renderer_webgpu/wgpu_rasterizer.h
++++ b/src/video_core/renderer_webgpu/wgpu_rasterizer.h
+@@ -113,12 +113,6 @@
+         u64 display_misses = 0;
+     } stats;
+
+-    /// Last color target drawn to.
+-    wgpu::TextureView debug_last_target;
+-    u32 debug_last_width = 0;
+-    u32 debug_last_height = 0;
+-    u64 debug_last_serial = 0;
+-
+ private:
+     Vulkan::StateTracker state_tracker;
+     Scheduler scheduler;
+--- a/src/video_core/renderer_webgpu/wgpu_texture_cache.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_texture_cache.cpp
+@@ -206,12 +206,6 @@
+     blitter.Blit(dst.RenderTarget(), dst.HostFormat(), dst.Width(), dst.Height(), dst_region,
+                  src.Handle(Shader::TextureType::Color2D), src.Kind(), src.Width(), src.Height(),
+                  src_region, filter == Tegra::Engines::Fermi2D::Filter::Bilinear);
+-    if (dst.Width() >= 640 && dst.Height() >= 360) {
+-        last_blit_target = dst.Handle(Shader::TextureType::Color2D);
+-        last_blit_width = dst.Width();
+-        last_blit_height = dst.Height();
+-        ++last_blit_serial;
+-    }
+ }
+
+ void TextureCacheRuntime::CopyImage(Image& dst, Image& src,
+--- a/src/video_core/renderer_webgpu/wgpu_texture_cache.h
++++ b/src/video_core/renderer_webgpu/wgpu_texture_cache.h
+@@ -119,10 +119,6 @@
+     Blitter& blitter;
+     u64 memory_usage = 0;
+     wgpu::Buffer copy_buffer;
+-    wgpu::TextureView last_blit_target;
+-    u32 last_blit_width = 0;
+-    u32 last_blit_height = 0;
+-    u64 last_blit_serial = 0;
+ };
+
+ class Image : public VideoCommon::ImageBase {
