@@ -26,7 +26,7 @@ shell.innerHTML = `
     <button class="icon-button library-settings" id="library-settings" title="Settings (Tab)" aria-label="Settings">${icon('settings')}</button>
     <div class="library-content">
       <h1 id="library-title">NX-Web</h1><p class="tagline">Your games. A new window.</p>
-      <div id="library-drop"></div><p id="compatibility-problems" role="status" hidden></p><div id="launch-status" role="status"><p id="runtime-problem" hidden></p></div>
+      <div id="library-drop"></div><div id="compatibility-problems" role="status" hidden></div><div id="launch-status" role="status"><p id="runtime-problem" hidden></p></div>
       <section id="recent-section" aria-label="Recently opened" hidden><div class="recent-heading"><span>Recently opened</span><button class="text-button" id="clear-recent">Clear</button></div><div id="recent-games"></div></section>
     </div>
     <button id="shortcut-hint" class="text-button shortcut-hint">Press <kbd>?</kbd> for shortcuts</button>
@@ -281,17 +281,32 @@ function renderRecent() {
     row.title = 'Choose this file again to reopen. Game files are not stored in the recent list.';
     const name = document.createElement('strong'); name.textContent = file.name;
     const size = document.createElement('span'); size.textContent = `${(file.size / 1024 ** 2).toFixed(1)} MB`;
-    row.append(name, size); row.addEventListener('click', () => $('file-input').click()); $('recent-games').append(row);
+    row.append(name, size); row.addEventListener('click', () => { $('rom-status').textContent = `Choose ${file.name} again to reopen it. NX-Web doesn't keep copies of your games.`; $('file-input').click(); }); $('recent-games').append(row);
   }
 }
 function saveRecent() { try { localStorage.setItem('nx-recent', JSON.stringify(recent)); } catch {} renderRecent(); }
+let chosen = null;
 function remember(file) { if (file && /\.(nro|nsp|xci|zip|7z|rar|tar|tgz|gz|bz2|xz|zst)$/i.test(file.name)) { recent = rememberGame(recent,file); saveRecent(); } }
-$('file-input').addEventListener('change', () => remember($('file-input').files[0]));
-$('drop-zone').addEventListener('drop', event => remember(event.dataTransfer.files[0]));
+$('file-input').addEventListener('change', () => { chosen = $('file-input').files[0]; });
+$('drop-zone').addEventListener('drop', event => { chosen = event.dataTransfer.files[0]; });
+new MutationObserver(() => { if (chosen && ['Booting','Running'].includes($('wasm-state').textContent)) { remember(chosen); chosen = null; } }).observe($('wasm-state'), { childList:true, subtree:true });
+window.addEventListener('dragover', event => {
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = $('library').hidden ? 'none' : 'copy';
+});
+window.addEventListener('drop', event => {
+  const handled = event.defaultPrevented; event.preventDefault();
+  if (handled || $('library').hidden || $('drop-zone').contains(event.target) || event.target.closest?.('dialog') || !event.dataTransfer?.files.length) return;
+  $('drop-zone').dispatchEvent(new DragEvent('drop', { dataTransfer:event.dataTransfer, bubbles:true, cancelable:true }));
+});
 $('clear-recent').addEventListener('click', () => { recent = []; saveRecent(); }); renderRecent();
 runPreflight().then(({checks}) => {
   const problems = compatibilityProblems(checks); $('compatibility-problems').hidden = !problems.length;
-  $('compatibility-problems').textContent = problems.map(problem => `${problem.label}: ${problem.help || problem.value}`).join(' ');
+  if (!problems.length) return;
+  const heading = document.createElement('strong'); heading.textContent = "This browser can't run games yet";
+  const list = document.createElement('ul');
+  for (const problem of problems) { const item = document.createElement('li'); item.textContent = `${problem.label}: ${problem.help || problem.value}`; list.append(item); }
+  $('compatibility-problems').replaceChildren(heading, list);
 }).catch(() => { $('compatibility-problems').hidden = false; $('compatibility-problems').textContent = 'Browser check unavailable. Use recent Chrome with WebGPU and COOP/COEP isolation over HTTPS or localhost.'; });
 const cleanLabels = () => {
   for (const node of document.querySelectorAll('#settings-panels button, #settings-panels h2, #settings-panels h3')) {

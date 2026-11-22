@@ -666,6 +666,11 @@ async function findRomInArchive(file) {
   return decoded ? { ...decoded, name: baseName(decoded.name) } : null;
 }
 
+async function hasNroHeader(file) {
+  const magic = new Uint8Array(await file.slice(0x10, 0x14).arrayBuffer());
+  return String.fromCharCode(...magic) === 'NRO0';
+}
+
 // Handle dropped or selected ROM file, or an archive holding one
 async function handleFile(file) {
   if (!file) return;
@@ -694,7 +699,7 @@ async function loadFile(file) {
   }
   if (isArchive(lowerName)) {
     if (isRomLoaded) {
-      alert('A game is already running. Reload the page to start another one.');
+      setRomStatus('A game is already running. Go back to the library to open another one.');
       return;
     }
     setRomStatus(`Opening ${file.name}...`);
@@ -704,38 +709,44 @@ async function loadFile(file) {
     try {
       found = await findRomInArchive(file);
     } catch (err) {
-      setRomStatus(`Cannot open ${file.name}: ${err.message}`);
+      setRomStatus(`Couldn't open ${file.name}: ${err.message}. The archive may be damaged or in a format the engine can't read.`);
       diagnostics.fail(null, err);
-      alert(`Cannot open ${file.name}: ${err.message}`);
       return;
     }
     if (!found) {
-      setRomStatus(`${file.name} holds no game; importing it as keys or firmware.`);
+      setRomStatus(`${file.name} holds no game; checking it for keys or firmware...`);
       await importSystemFiles([file]);
+      setRomStatus(sysProgress.textContent.startsWith('Import failed')
+        ? `${file.name} doesn't contain a game NX-Web can open. Choose a .nro, .nsp or .xci file, or an archive holding one.`
+        : `${file.name} holds no game. ${sysProgress.textContent}`);
       return;
     }
     rom = found;
     log(`Archive selected ${rom.name} (${rom.size} bytes) in ${((performance.now() - openedAt) / 1000).toFixed(1)} s.`, 'ui');
   } else if (!hasExtension(lowerName, ROM_EXTENSIONS)) {
-    setRomStatus(`Unsupported ROM format "${file.name}".`);
-    alert(`Unsupported ROM format "${file.name}".`);
+    setRomStatus(`${file.name} isn't a game file NX-Web can open. Choose a .nro, .nsp or .xci file, or an archive holding one.`);
     return;
   }
   if (isRomLoaded) {
-    alert('A game is already running. Reload the page to start another one.');
+    setRomStatus('A game is already running. Go back to the library to open another one.');
     return;
   }
+  if (rom.file && hasExtension(rom.name, ['.nro']) && !await hasNroHeader(rom.file)) {
+    setRomStatus(`${rom.name} isn't a valid homebrew .nro file; it may be damaged or incomplete. Choose another file.`);
+    return;
+  }
+  setRomStatus(`Starting ${rom.name}...`);
 
   try {
     if (!await inspectGpu()) {
-      setRomStatus('Cannot boot: WebGPU is unavailable. See the Renderer card for details. This runtime has no WebGL fallback.');
+      setRomStatus(`Can't start ${rom.name}: this browser has no working WebGPU, which NX-Web needs to draw games. See Settings → Diagnostics for details.`);
       diagnostics.fail('environment', 'WebGPU is unavailable');
       return;
     }
 
     await initWasmCore();
     if (!isInitialized) {
-      alert('The Eden WebAssembly core is not ready.');
+      setRomStatus(`Can't start ${rom.name}: the emulator engine didn't start. See Settings → Diagnostics for details.`);
       return;
     }
 
@@ -792,10 +803,9 @@ async function loadFile(file) {
       browserRom?.close();
       browserRom = null;
       console.error('Failed to load ROM:', err.stack || err.message);
-      alert(`Failed to load ROM: ${err.message}`);
       loader.fail();
       wasmStatusText.textContent = 'ROM Load Failed';
-      setRomStatus(`ROM load failed: ${err.message}`);
+      setRomStatus(`Couldn't load ${rom.name}: ${err.message}.`);
       diagnostics.fail(null, err);
     }
   } finally {
@@ -813,16 +823,16 @@ dropZone.addEventListener('click', () => fileInput.click());
 
 dropZone.addEventListener('dragover', (e) => {
   e.preventDefault();
-  dropZone.classList.add('dragover');
+  dropZone.classList.add('dragover', 'drag-over');
 });
 
-dropZone.addEventListener('dragleave', () => {
-  dropZone.classList.remove('dragover');
+dropZone.addEventListener('dragleave', (e) => {
+  if (!dropZone.contains(e.relatedTarget)) dropZone.classList.remove('dragover', 'drag-over');
 });
 
 dropZone.addEventListener('drop', (e) => {
   e.preventDefault();
-  dropZone.classList.remove('dragover');
+  dropZone.classList.remove('dragover', 'drag-over');
   if (e.dataTransfer.files.length > 0) {
     handleFile(e.dataTransfer.files[0]);
   }
