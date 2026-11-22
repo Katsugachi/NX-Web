@@ -1,0 +1,8 @@
+{
+  "version": "0.1.0",
+  "webRevision": "NX-Web initial",
+  "engineRevision": "d358e85",
+  "build": "release",
+  "local": true,
+  "deployedAt": null
+}
