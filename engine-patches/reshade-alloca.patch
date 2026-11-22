@@ -1,0 +1,11 @@
+--- a/.cache/cpm/reshade/v6.8.0/source/effect_symbol_table.cpp
++++ b/.cache/cpm/reshade/v6.8.0/source/effect_symbol_table.cpp
+@@ -6,5 +6,8 @@
+ #include "effect_symbol_table.hpp"
+ #include <cassert>
++#ifdef __EMSCRIPTEN__
++#include <alloca.h>
++#endif
+ #include <malloc.h> // alloca
+ #include <algorithm> // std::upper_bound, std::sort
+ #include <functional> // std::greater

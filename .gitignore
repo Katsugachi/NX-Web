@@ -1,0 +1,15 @@
+node_modules/
+web/runtime/
+artifacts/
+*.log
+.DS_Store
+*.nro
+*.nsp
+*.xci
+*.nca
+*.nso
+*.keys
+firmware/
+saves/
+telemetry/
+.env*
