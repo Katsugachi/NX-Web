@@ -301,8 +301,19 @@ try {
   journalStorage.set(journalKey, JSON.stringify({ time:Date.now() + 100, changes:[['sdmc/retry.txt', 'AQ==']] }));
   const retryJournal = journalStorage.get(journalKey);
   failTransaction = true;
-  await assert.rejects(restoreSaves({ mkdirTree() {}, writeFile() {} }));
+  const writebackRecovery = new Map();
+  await restoreSaves({ mkdirTree() {}, writeFile: (path, data) => writebackRecovery.set(path, data) });
+  assert.deepEqual(writebackRecovery.get(`${EDEN_DATA_ROOT}/sdmc/retry.txt`), new Uint8Array([1]), 'failed writeback still restores journaled saves into FS');
+  assert.deepEqual(writebackRecovery.get(`${EDEN_DATA_ROOT}/sdmc/normal.txt`), new Uint8Array([3]), 'failed writeback still restores existing saves');
+  assert.equal(snapshot.has('sdmc/retry.txt'), false);
+  assert.ok(warnings.some(args => /writeback failed/.test(args[0])));
   assert.equal(journalStorage.get(journalKey), retryJournal, 'failed recovery retains the journal');
+  failTransaction = true;
+  await assert.rejects(importSaves(new File([backup], 'import.zip')));
+  assert.equal(journalStorage.get(journalKey), retryJournal, 'management cannot bypass a failed journal merge');
+  await restoreSaves({ mkdirTree() {}, writeFile() {} });
+  assert.equal(snapshot.has('sdmc/retry.txt'), true, 'later recovery retries the writeback');
+  assert.equal(journalStorage.has(journalKey), false);
 
   journalStorage.set(journalKey, JSON.stringify({ time:0, changes:[['sdmc/old.txt', 'AQ==']] }));
   await restoreSaves({ mkdirTree() {}, writeFile() {} });

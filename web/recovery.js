@@ -125,7 +125,7 @@ function writeJournal(FS, files, stored) {
   } catch (err) { console.warn('Save journal skipped:', err); }
 }
 
-async function mergeSaveJournal() {
+async function mergeSaveJournal(allowWritebackFailure = false) {
   let entries = await withStore(SAVES, 'readonly', async store => {
     const [keys, values] = await Promise.all([requestResult(store.getAllKeys()), requestResult(store.getAll())]);
     return keys.map((key, i) => [key, values[i]]);
@@ -151,19 +151,24 @@ async function mergeSaveJournal() {
     }
     const meta = { time:Math.max(Date.now(), journal.time), files:merged.size, bytes:[...merged.values()].reduce((sum, blob) => sum + blob.size, 0) };
     merged.set(META_KEY, meta);
-    await withStore(SAVES, 'readwrite', store => {
-      store.clear();
-      for (const [path, data] of merged) store.put(data, path);
-    });
     entries = [...merged];
-    clearJournal(raw);
+    try {
+      await withStore(SAVES, 'readwrite', store => {
+        store.clear();
+        for (const [path, data] of merged) store.put(data, path);
+      });
+      clearJournal(raw);
+    } catch (err) {
+      if (!allowWritebackFailure) throw err;
+      console.warn('Save journal writeback failed; recovery will retry:', err);
+    }
   } else if (journal) clearJournal(raw);
   return entries;
 }
 
 /// Writes the stored save point into the engine filesystem. Returns the number of files.
 export async function restoreSaves(FS) {
-  const entries = await mergeSaveJournal();
+  const entries = await mergeSaveJournal(true);
   let count = 0;
   for (const [path, data] of entries) {
     if (path === META_KEY) continue;
