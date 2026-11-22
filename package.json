@@ -1,0 +1,19 @@
+{
+  "name": "nx-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "dev": "node scripts/serve.mjs",
+    "build:engine": "bash scripts/build-engine.sh",
+    "test": "node scripts/test.mjs",
+    "test:runtime": "node tests/web_artifact_smoke.cjs && node tests/archive_reader.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.18.1"
+  }
+}
