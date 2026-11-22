@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -59,18 +59,25 @@ try {
   writeFileSync(path.join(engine, 'build-web', 'keep'), 'build');
   writeFileSync(path.join(engine, '.cache', 'keep'), 'cache');
   writeFileSync(path.join(engine, 'source.txt.orig'), 'backup');
+  writeFileSync(path.join(engine, 'source.txt.rej'), 'reject');
+  writeFileSync(path.join(engine, 'local-notes.txt'), 'keep my notes');
+  writeFileSync(path.join(engine, 'unrelated.orig'), 'keep unrelated backup');
   for (let iteration = 0; iteration < 2; iteration++) {
     const rebuilt = apply(true);
     check(rebuilt);
     assert.doesNotMatch(rebuilt.stdout, /Already applied:/);
     assert.equal(readFileSync(path.join(engine, 'build-web', 'keep'), 'utf8'), 'build');
     assert.equal(readFileSync(path.join(engine, '.cache', 'keep'), 'utf8'), 'cache');
+    assert.equal(readFileSync(path.join(engine, 'local-notes.txt'), 'utf8'), 'keep my notes');
+    assert.equal(readFileSync(path.join(engine, 'unrelated.orig'), 'utf8'), 'keep unrelated backup');
+    assert.equal(existsSync(path.join(engine, 'source.txt.orig')), false);
+    assert.equal(existsSync(path.join(engine, 'source.txt.rej')), false);
   }
   writeFileSync(path.join(engine, 'source.txt'), 'incompatible\n');
   const incompatible = apply();
   assert.notEqual(incompatible.status, 0);
   assert.doesNotMatch(incompatible.stdout, /Already applied:/);
-  console.log('Engine patches: pristine, already applied, partial/untracked, repeated reset, ignored outputs and conflicts OK');
+  console.log('Engine patches: pristine, already applied, partial/untracked, repeated reset, preserved local files, ignored outputs and conflicts OK');
 } finally {
   rmSync(directory, { recursive: true, force: true });
 }
