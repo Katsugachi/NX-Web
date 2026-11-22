@@ -355,6 +355,25 @@ try {
     assert.deepEqual(afterManagement.get(`${EDEN_DATA_ROOT}/${otherGamePath}`), new Uint8Array([9]), 'other games retain journaled progress after pre-boot management');
     await clearSaves();
   }
+  sdContents.clear();
+  contents.clear();
+  const deletionFS = { ...FS };
+  const stopDeletion = watchSaves(() => deletionFS, () => true, () => {}, 2000, lifecycle);
+  await settle();
+  sdContents.set('in-flight.txt', new Uint8Array([7]));
+  const storingDeletedFile = poll();
+  sdContents.delete('in-flight.txt');
+  lifecycle.dispatchEvent(new Event('pagehide'));
+  assert.deepEqual(JSON.parse(journalStorage.get(journalKey)).changes, [['sdmc/in-flight.txt', null]], 'journal deletes paths present only in the in-flight snapshot');
+  const stoppingDeletion = stopDeletion();
+  await storingDeletedFile;
+  await stoppingDeletion;
+  assert.equal(snapshot.has('sdmc/in-flight.txt'), true, 'simulate only the original in-flight snapshot committing');
+  const afterDeletion = new Map();
+  await restoreSaves({ mkdirTree() {}, writeFile: (path, data) => afterDeletion.set(path, data) });
+  assert.equal(afterDeletion.has(`${EDEN_DATA_ROOT}/sdmc/in-flight.txt`), false);
+  assert.equal(snapshot.has('sdmc/in-flight.txt'), false);
+  assert.equal(journalStorage.has(journalKey), false);
 } finally {
   globalThis.indexedDB = originalIndexedDB;
   globalThis.setInterval = originalSetInterval;

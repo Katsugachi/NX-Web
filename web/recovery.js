@@ -103,7 +103,7 @@ function clearJournal(expected = readJournal()) {
   } catch (err) { console.warn('Save journal could not be cleared:', err); }
 }
 
-function writeJournal(FS, files, stored) {
+function writeJournal(FS, files, stored, inFlight) {
   try {
     const current = fileSignatures(files);
     const changes = [];
@@ -117,7 +117,8 @@ function writeJournal(FS, files, stored) {
       for (let i = 0; i < data.length; i += 8192) binary += String.fromCharCode(...data.subarray(i, i + 8192));
       changes.push([path, btoa(binary)]);
     }
-    for (const path of stored.keys()) if (!current.has(path)) changes.push([path, null]);
+    const previousPaths = new Set([...stored.keys(), ...(inFlight?.keys() ?? [])]);
+    for (const path of previousPaths) if (!current.has(path)) changes.push([path, null]);
     if (!changes.length) return;
     const journal = JSON.stringify({ time:Date.now(), changes });
     if (journal.length > JOURNAL_LIMIT) throw new Error('Save journal exceeds 2 MB');
@@ -350,6 +351,7 @@ export function watchSaves(getFS, healthy, onSaved, intervalMs = 2_000, lifecycl
   let storedFiles = restoredSignatures.get(initialFS) ?? fileSignatures(initialFS ? listSaveFiles(initialFS) : []);
   let stored = [...storedFiles].map(([path, sig]) => `${path}:${sig}`).sort().join('|');
   let busy = null;
+  let inFlightFiles = null;
   let active = true;
   const flush = (immediate = false) => {
     if (!active) return Promise.resolve();
@@ -361,6 +363,7 @@ export function watchSaves(getFS, healthy, onSaved, intervalMs = 2_000, lifecycl
         const files = listSaveFiles(FS);
         const sig = signature(files);
         if (immediate || sig !== stored) {
+          inFlightFiles = fileSignatures(files);
           onSaved(await storeSaves(FS, files, connection));
           stored = sig;
           storedFiles = fileSignatures(files);
@@ -369,13 +372,13 @@ export function watchSaves(getFS, healthy, onSaved, intervalMs = 2_000, lifecycl
       } catch (err) {
         console.warn('Save point failed:', err);
       }
-    })().finally(() => { busy = null; });
+    })().finally(() => { busy = null; inFlightFiles = null; });
     return busy;
   };
   const onPageHide = () => {
     const FS = getFS();
     if (!active || !FS || !healthy()) return;
-    try { writeJournal(FS, listSaveFiles(FS), storedFiles); }
+    try { writeJournal(FS, listSaveFiles(FS), storedFiles, inFlightFiles); }
     catch (err) { console.warn('Save journal skipped:', err); }
     flush(true);
   };
