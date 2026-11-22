@@ -55,6 +55,7 @@ export function setupInput(getModule) {
   const emptyState = () => ({ buttons: new Set(), sticks: [[0, 0], [0, 0]] });
   const sent = Array.from({ length: MAX_PLAYERS }, emptyState);
   let sentModule = null;
+  const isDialogOpen = () => Boolean(document.querySelector('dialog[open]'));
 
   function source(name, player = 0) {
     if (!sources.has(name)) sources.set(name, { player, ...emptyState() });
@@ -126,7 +127,7 @@ export function setupInput(getModule) {
     flush();
   }
   window.addEventListener('keydown', e => {
-    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || usesNativeKeys(e) || document.querySelector('dialog[open]')) return;
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || usesNativeKeys(e) || isDialogOpen()) return;
     const key = bindingKey(e);
     if (!ACTIONS.some(action => !action.hotkey && bindings[action.id] === key)) return;
     e.preventDefault();
@@ -140,7 +141,10 @@ export function setupInput(getModule) {
     updateKeyboard();
   }
   window.addEventListener('blur', releaseKeyboard);
-  window.addEventListener('nx-release-input', releaseKeyboard);
+  window.addEventListener('nx-release-input', () => {
+    clearGamepadInput();
+    releaseKeyboard();
+  });
   document.addEventListener('focusin', event => { if (isKeyboardField(event.target)) releaseKeyboard(); });
   window.addEventListener('nx-bindings', event => {
     bindings = event.detail;
@@ -203,13 +207,17 @@ export function setupInput(getModule) {
     return typeof navigator.getGamepads === 'function' ? [...navigator.getGamepads()].filter(Boolean) : [];
   }
 
-  function poll() {
-    const pads = gamepads();
+  function clearGamepadInput() {
     for (const name of [...sources.keys()]) {
       if (name.startsWith('gamepad')) sources.delete(name);
     }
+  }
+
+  function poll() {
+    const pads = gamepads();
+    clearGamepadInput();
     const layout = PAD_LAYOUTS[prefs.layout];
-    pads.forEach((gamepad, slot) => {
+    if (!isDialogOpen()) pads.forEach((gamepad, slot) => {
       const pad = source(`gamepad${gamepad.index}`, padPlayer(slot));
       gamepad.buttons.forEach((state, index) => {
         if ((state.pressed || state.value > 0.5) && layout[index] !== undefined) pad.buttons.add(layout[index]);
