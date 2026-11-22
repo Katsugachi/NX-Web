@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { runPreflight } from './diagnostics.js';
 import { recentGames, rememberGame, compatibilityProblems, runtimeProblem } from './shell-model.js';
+import { canPickHandles, forgetHandles, pickGame, rememberHandle, reopenGame } from './recent-files.js';
 import { ACTIONS, DEFAULT_BINDINGS, bindingKey, keyLabel, readBindings, rebind, usesNativeKeys, writeBindings } from './bindings.js';
 
 const $ = id => document.getElementById(id);
@@ -43,11 +44,13 @@ shell.innerHTML = `
     <div class="drawer-heading"><h2 id="settings-title">Settings</h2><button id="close-settings" class="icon-button" aria-label="Close settings">${icon('close')}</button></div>
     <div role="tablist" aria-label="Settings sections" id="settings-tabs"></div><div id="settings-panels"></div>
   </dialog>
+  <dialog id="leave-dialog" aria-labelledby="leave-title" aria-describedby="leave-text"><h2 id="leave-title">Stop this game?</h2><p id="leave-text">You'll go back to the library. In-game saves already written to storage are kept; progress since then is lost.</p><div class="dialog-actions"><button id="keep-playing" autofocus>Keep playing</button><button id="leave-game" class="primary">Stop and go back</button></div></dialog>
   <dialog id="shortcuts-dialog" aria-labelledby="shortcuts-title"><div class="drawer-heading"><div><h2 id="shortcuts-title">Stay in control.</h2><p>Your keyboard is the controller.</p></div><button id="close-shortcuts" class="icon-button" aria-label="Close shortcuts">${icon('close')}</button></div><div id="shortcuts-columns"></div><p class="shortcut-footnote">Change mappings in Settings → Controls. Alt shortcuts are fixed. Gamepads connect automatically.</p></dialog>`;
 document.body.append(shell);
 
 const drawer = $('settings-drawer');
 const shortcuts = $('shortcuts-dialog');
+const leave = $('leave-dialog');
 const sections = [
   ['controls', 'Controls', ['gamepads']],
   ['system', 'System files', ['system-files']],
@@ -195,9 +198,12 @@ $('save-state-slot').setAttribute('aria-label', 'Save slot');
 $('canvas').tabIndex = 0;
 $('show-joycons').closest('label').hidden = true;
 document.querySelectorAll('.joycon').forEach(node => node.remove());
+const backToLibrary = () => { location.href = location.pathname; };
 $('back-library').addEventListener('click', () => {
-  if (confirm('Return to the library and stop this game? In-game saves already written to storage are kept.')) location.href = location.pathname;
+  if (['Booting','Running','Paused'].includes($('wasm-state').textContent)) { releaseInput(); leave.showModal(); } else backToLibrary();
 });
+$('keep-playing').addEventListener('click', () => leave.close());
+$('leave-game').addEventListener('click', backToLibrary);
 $('player-fullscreen').addEventListener('click', () => {
   const action = document.fullscreenElement ? document.exitFullscreen() : $('player').requestFullscreen();
   action?.catch(() => { $('player-message').textContent = 'Fullscreen is unavailable in this browser.'; $('player-message').hidden = false; });
@@ -228,22 +234,22 @@ let barTimer;
 function showBar() {
   document.body.classList.remove('bar-hidden'); clearTimeout(barTimer);
   if ($('wasm-state').textContent === 'Running') barTimer = setTimeout(() => {
-    if (!drawer.open && !shortcuts.open && !$('player-toolbar').contains(document.activeElement)) document.body.classList.add('bar-hidden');
+    if (!drawer.open && !shortcuts.open && !leave.open && !$('player-toolbar').contains(document.activeElement)) document.body.classList.add('bar-hidden');
   }, 2000);
 }
 $('player').addEventListener('pointermove', showBar);
 $('player').addEventListener('touchstart', showBar, { passive:true });
 $('player-toolbar').addEventListener('focusin', showBar);
 $('player-toolbar').addEventListener('click', event => { if (event.target.tagName !== 'SELECT' && !drawer.open) $('canvas').focus(); });
-for (const dialog of [drawer, shortcuts]) dialog.addEventListener('close', () => {
-  if (!$('player').hidden && !drawer.open && !shortcuts.open) { $('canvas').focus(); showBar(); }
+for (const dialog of [drawer, shortcuts, leave]) dialog.addEventListener('close', () => {
+  if (!$('player').hidden && !drawer.open && !shortcuts.open && !leave.open) { $('canvas').focus(); showBar(); }
 });
 function hotkey(action) {
   const playing = !$('player').hidden;
   if (action === 'open' && !playing) $('file-input').click();
   else if (action === 'settings') drawer.open ? drawer.close() : openSettings();
   else if (action === 'shortcuts') shortcuts.open ? shortcuts.close() : openShortcuts();
-  else if (action === 'bar') { if (shortcuts.open) shortcuts.close(); else if (drawer.open) drawer.close(); showBar(); }
+  else if (action === 'bar') { if (leave.open) leave.close(); else if (shortcuts.open) shortcuts.close(); else if (drawer.open) drawer.close(); showBar(); }
   else if (playing) ({ pause:$('toggle-pause'), save:$('btn-save-state'), load:$('btn-load-slot'), fullscreen:$('player-fullscreen') })[action]?.click();
 }
 window.addEventListener('keydown', event => {
@@ -260,7 +266,7 @@ window.addEventListener('keydown', event => {
     return;
   }
   if (event.altKey || event.ctrlKey || event.metaKey || event.defaultPrevented) return;
-  const modalOpen = drawer.open || shortcuts.open;
+  const modalOpen = drawer.open || shortcuts.open || leave.open;
   if (modalOpen && event.code === 'Tab') return;
   if ($('settings-tabs').contains(event.target) && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
   if (usesNativeKeys(event)) return;
@@ -278,17 +284,51 @@ function renderRecent() {
   $('recent-games').replaceChildren(); $('recent-section').hidden = !recent.length;
   for (const file of recent) {
     const row = document.createElement('button'); row.className = 'recent-game'; row.innerHTML = icon('game');
-    row.title = 'Choose this file again to reopen. Game files are not stored in the recent list.';
+    row.title = `Open ${file.name}`;
     const name = document.createElement('strong'); name.textContent = file.name;
     const size = document.createElement('span'); size.textContent = `${(file.size / 1024 ** 2).toFixed(1)} MB`;
-    row.append(name, size); row.addEventListener('click', () => { $('rom-status').textContent = `Choose ${file.name} again to reopen it. NX-Web doesn't keep copies of your games.`; $('file-input').click(); }); $('recent-games').append(row);
+    row.append(name, size); row.addEventListener('click', () => reopenRecent(file.name)); $('recent-games').append(row);
   }
 }
+async function reopenRecent(name) {
+  let game;
+  try { game = await reopenGame(name); } catch (error) {
+    $('rom-status').textContent = error.name === 'NotAllowedError'
+      ? `NX-Web needs your permission to read ${name}. Click it again and choose Allow, or open it with the file picker.`
+      : `${name} is no longer where it was. Choose it again.`;
+    if (error.name !== 'NotAllowedError') $('file-input').click();
+    return;
+  }
+  if (game) { openGame(game.file, game.handle); return; }
+  $('rom-status').textContent = `Choose ${name} again to reopen it. NX-Web doesn't keep copies of your games.`;
+  $('file-input').click();
+}
+let pickedHandle = null;
+function openGame(file, handle) {
+  const files = new DataTransfer(); files.items.add(file);
+  pickedHandle = handle; $('file-input').files = files.files;
+  $('file-input').dispatchEvent(new Event('change'));
+}
+$('file-input').addEventListener('click', event => {
+  if (!canPickHandles()) return;
+  event.preventDefault();
+  const extensions = $('file-input').accept.split(',').filter(Boolean);
+  pickGame(extensions).then(({ file, handle }) => openGame(file, handle), error => {
+    if (error.name !== 'AbortError') { $('rom-status').textContent = `The file picker failed (${error.message}).`; console.error(error); }
+  });
+});
 function saveRecent() { try { localStorage.setItem('nx-recent', JSON.stringify(recent)); } catch {} renderRecent(); }
 let chosen = null;
-function remember(file) { if (file && /\.(nro|nsp|xci|zip|7z|rar|tar|tgz|gz|bz2|xz|zst)$/i.test(file.name)) { recent = rememberGame(recent,file); saveRecent(); } }
-$('file-input').addEventListener('change', () => { chosen = $('file-input').files[0]; });
-$('drop-zone').addEventListener('drop', event => { chosen = event.dataTransfer.files[0]; });
+function remember({ file, handle }) {
+  if (!file || !/\.(nro|nsp|xci|zip|7z|rar|tar|tgz|gz|bz2|xz|zst)$/i.test(file.name)) return;
+  recent = rememberGame(recent,file); saveRecent();
+  Promise.resolve(handle).then(handle => rememberHandle(file.name, handle, recent.map(game => game.name)), () => {});
+}
+$('file-input').addEventListener('change', () => { chosen = { file:$('file-input').files[0], handle:pickedHandle }; pickedHandle = null; });
+$('drop-zone').addEventListener('drop', event => {
+  const item = [...event.dataTransfer.items].find(item => item.kind === 'file');
+  chosen = { file:event.dataTransfer.files[0], handle:item?.getAsFileSystemHandle?.() };
+});
 new MutationObserver(() => { if (chosen && ['Booting','Running'].includes($('wasm-state').textContent)) { remember(chosen); chosen = null; } }).observe($('wasm-state'), { childList:true, subtree:true });
 window.addEventListener('dragover', event => {
   event.preventDefault();
@@ -299,7 +339,7 @@ window.addEventListener('drop', event => {
   if (handled || $('library').hidden || $('drop-zone').contains(event.target) || event.target.closest?.('dialog') || !event.dataTransfer?.files.length) return;
   $('drop-zone').dispatchEvent(new DragEvent('drop', { dataTransfer:event.dataTransfer, bubbles:true, cancelable:true }));
 });
-$('clear-recent').addEventListener('click', () => { recent = []; saveRecent(); }); renderRecent();
+$('clear-recent').addEventListener('click', () => { recent = []; saveRecent(); forgetHandles(); }); renderRecent();
 runPreflight().then(({checks}) => {
   const problems = compatibilityProblems(checks); $('compatibility-problems').hidden = !problems.length;
   if (!problems.length) return;
