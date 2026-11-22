@@ -4,9 +4,10 @@ export function playerFps(state, fps) {
   return state === 2 ? `${(Number.isFinite(fps) ? fps : 0).toFixed(1)} FPS` : state === 3 ? 'Paused' : '--';
 }
 
-export async function rebootGame(file, { stash, mark, shutdown, reload }) {
+export async function rebootGame(file, { stash, preserve, mark, shutdown, reload }) {
   if (!file) throw new Error('No game is loaded.');
   await stash(file);
+  await preserve();
   mark(file);
   shutdown();
   reload();

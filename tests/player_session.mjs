@@ -9,16 +9,16 @@ for (const state of [0, 1, 4, 5]) assert.equal(playerFps(state, 40), '--');
 
 const file = { name: 'hello.nro' };
 const calls = [];
-const actions = Object.fromEntries(['stash', 'mark', 'shutdown', 'reload'].map(name => [name, asyncFile => {
+const actions = Object.fromEntries(['stash', 'preserve', 'mark', 'shutdown', 'reload'].map(name => [name, asyncFile => {
   calls.push(name);
   if (name === 'stash' || name === 'mark') assert.equal(asyncFile, file);
 }]));
 await rebootGame(file, actions);
-assert.deepEqual(calls, ['stash', 'mark', 'shutdown', 'reload']);
+assert.deepEqual(calls, ['stash', 'preserve', 'mark', 'shutdown', 'reload']);
 calls.length = 0;
 await assert.rejects(rebootGame(null, actions), /No game/);
 assert.deepEqual(calls, []);
-for (const failed of ['stash', 'mark']) {
+for (const failed of ['stash', 'preserve', 'mark']) {
   calls.length = 0;
   await assert.rejects(rebootGame(file, { ...actions, [failed]: () => { throw new Error('storage blocked'); } }), /storage blocked/);
   assert.ok(!calls.includes('shutdown') && !calls.includes('reload'), 'storage failure leaves the running game intact');

@@ -18,6 +18,7 @@ import { isArchive, openArchive, storedRomSlice } from './archive.js';
 import { BUILD_CORES, activeCore, coreBackend, coreEnvironment, findCore, runtimeBase, storeCore } from './cores.js';
 import {
   restoreSaves,
+  persistSaves,
   watchSaves,
   savePointInfo,
   clearSaves,
@@ -655,18 +656,27 @@ function pauseLoop() {
 
 async function resetEmulation() {
   if (resetting) return;
+  const wasRunning = isRunning;
   resetting = true;
   btnReset.disabled = true;
   btnReset.textContent = 'Resetting…';
   try {
     await rebootGame(lastGameFile, {
       stash: file => stashGameFile(file, true),
+      preserve: async () => {
+        if (wasRunning) pauseLoop();
+        await stopSaveWatch?.();
+        stopSaveWatch = null;
+        showSavePoint(await persistSaves(edenModule.FS));
+      },
       mark: file => sessionStorage.setItem(RESUME_KEY, JSON.stringify({ name: file.name, reset: true })),
       shutdown: () => { if (!crashed) edenModule?._eden_shutdown(); },
       reload: () => location.reload(),
     });
   } catch (err) {
     try { sessionStorage.removeItem(RESUME_KEY); } catch {}
+    if (!stopSaveWatch) stopSaveWatch = watchSaves(() => edenModule?.FS, () => isRunning && !crashed, showSavePoint);
+    if (wasRunning) startLoop();
     log(`Could not reset the game: ${err.message}`, 'err');
     setRomStatus(`Could not reset the game: ${err.message}. The current game has not been reloaded.`);
     btnReset.textContent = 'Reset failed — retry';
