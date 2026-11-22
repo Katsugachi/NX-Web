@@ -12,7 +12,7 @@
 import { EDEN_DATA_ROOT, readZipEntries, writeZip } from './system-files.js';
 
 // nand/system/save holds the user profile; user saves are filed under its id, so both are needed.
-const SAVE_DIRS = ['nand/user/save', 'nand/system/save'];
+const SAVE_DIRS = ['nand/user/save', 'nand/system/save', 'sdmc'];
 const DB_NAME = 'eden-recovery';
 const SAVES = 'saves';
 const CRASHES = 'crashes';
@@ -34,8 +34,8 @@ function openDb() {
   });
 }
 
-async function withStore(name, mode, fn) {
-  const db = await openDb();
+async function withStore(name, mode, fn, connection) {
+  const db = connection ?? await openDb();
   let tx;
   try {
     tx = db.transaction(name, mode);
@@ -50,7 +50,7 @@ async function withStore(name, mode, fn) {
     try { tx?.abort(); } catch {}
     throw err;
   } finally {
-    db.close();
+    if (!connection) db.close();
   }
 }
 
@@ -102,7 +102,7 @@ export async function restoreSaves(FS) {
   return count;
 }
 
-async function storeSaves(FS, files) {
+async function storeSaves(FS, files, connection) {
   const meta = { time: Date.now(), files: files.length, bytes: 0 };
   await withStore(SAVES, 'readwrite', store => {
     store.clear();
@@ -112,7 +112,7 @@ async function storeSaves(FS, files) {
       store.put(new Blob([data]), path);
     }
     store.put(meta, META_KEY);
-  });
+  }, connection);
   return meta;
 }
 
@@ -120,7 +120,8 @@ export async function savePointInfo() {
   return withStore(SAVES, 'readonly', store => requestResult(store.get(META_KEY)));
 }
 
-export async function clearSaves() {
+export async function clearSaves(stopWatching) {
+  await stopWatching?.();
   await withStore(SAVES, 'readwrite', store => store.clear());
 }
 
@@ -153,6 +154,7 @@ export function savePathFor(name, profile) {
   const base = parts.at(-1) ?? '';
   if (parts[0] === '__MACOSX' || base === '.DS_Store' || base.startsWith('._')) return null;
   const lower = parts.map(part => part.toLowerCase());
+  if (lower[0] === 'sdmc' && parts.length > 1) return ['sdmc', ...parts.slice(1)].join('/');
   for (let i = 0; i + 3 < parts.length; i++) {
     if (lower[i] === 'nand' && (lower[i + 1] === 'user' || lower[i + 1] === 'system') && lower[i + 2] === 'save') {
       return [`nand/${lower[i + 1]}/save`, ...parts.slice(i + 3)].join('/');
@@ -234,9 +236,12 @@ export async function listSlots() {
 
 /// Replaces the game's saves in the stored save point with `slot`. Returns the slot record and
 /// the new save point metadata.
-export async function loadSlot(slot) {
+export async function loadSlot(slot, runningTitleId) {
   const record = await withStore(SLOTS, 'readonly', store => requestResult(store.get(slot)));
   if (!record) throw new Error(`Slot ${slot} is empty`);
+  if (runningTitleId !== undefined && record.titleId !== runningTitleId?.toUpperCase()) {
+    throw new Error(`Slot ${slot} belongs to ${record.name}. Stop the current game before loading another game's slot.`);
+  }
   const kept = (await storedSaves()).filter(([path]) => !inTitleSave(path, record.titleId));
   // A profile created after the slot was saved has a new id; file the slot under it.
   const profile = kept.map(([key]) => PROFILE_SAVE.exec(key)?.[1]).find(Boolean);
@@ -252,33 +257,55 @@ export async function clearSlot(slot) {
 
 /// Polls the save folders while `healthy()` holds and stores a save point once a change has
 /// settled. Returns a function that stops watching.
-export function watchSaves(getFS, healthy, onSaved, intervalMs = 10_000) {
+export function watchSaves(getFS, healthy, onSaved, intervalMs = 10_000, lifecycle = globalThis) {
+  let connection;
+  const ready = openDb().then(db => { connection = db; }).catch(err => {
+    console.warn('Save database failed:', err);
+  });
   const initialFS = getFS();
   let stored = initialFS ? signature(listSaveFiles(initialFS)) : null;
   let pending = null;
-  let busy = false;
-  const timer = setInterval(async () => {
+  let busy = null;
+  let active = true;
+  const flush = (immediate = false) => {
+    if (!active) return Promise.resolve();
+    if (busy) return immediate ? busy.then(() => flush(true)) : busy;
     const FS = getFS();
-    if (busy || !FS || !healthy()) return;
-    busy = true;
-    try {
-      const files = listSaveFiles(FS);
-      const sig = signature(files);
-      if (stored === null) {
-        // The first poll after boot only records what was restored.
-        stored = sig;
-      } else if (sig !== stored && sig === pending) {
-        onSaved(await storeSaves(FS, files));
-        stored = sig;
+    if (!FS || !healthy()) return Promise.resolve();
+    busy = (async () => {
+      try {
+        const files = listSaveFiles(FS);
+        const sig = signature(files);
+        if (immediate || (sig !== stored && sig === pending)) {
+          onSaved(await storeSaves(FS, files, connection));
+          stored = sig;
+        } else if (stored === null) {
+          // The first poll after boot only records what was restored.
+          stored = sig;
+        }
+        pending = sig;
+      } catch (err) {
+        console.warn('Save point failed:', err);
       }
-      pending = sig;
-    } catch (err) {
-      console.warn('Save point failed:', err);
-    } finally {
-      busy = false;
-    }
-  }, intervalMs);
-  return () => clearInterval(timer);
+    })().finally(() => { busy = null; });
+    return busy;
+  };
+  const onHidden = () => {
+    if (lifecycle.document?.visibilityState === 'hidden') flush(true);
+  };
+  const onPageHide = () => { flush(true); };
+  lifecycle.document?.addEventListener('visibilitychange', onHidden);
+  lifecycle.addEventListener?.('pagehide', onPageHide);
+  const timer = setInterval(() => flush(), intervalMs);
+  return async () => {
+    active = false;
+    clearInterval(timer);
+    lifecycle.document?.removeEventListener('visibilitychange', onHidden);
+    lifecycle.removeEventListener?.('pagehide', onPageHide);
+    await busy;
+    await ready;
+    connection?.close();
+  };
 }
 
 export async function recordCrash(report) {

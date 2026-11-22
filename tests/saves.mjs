@@ -7,13 +7,14 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { readZipEntries, writeZip } from '../web/system-files.js';
-import { savePathFor, restoreSaves, watchSaves, savePointInfo } from '../web/recovery.js';
+import { savePathFor, restoreSaves, watchSaves, savePointInfo, exportSaves, importSaves, loadSlot, clearSaves } from '../web/recovery.js';
 import { EDEN_DATA_ROOT } from '../web/system-files.js';
 
 const files = [
   { name: 'nand/user/save/0000000000000000/0123456789ABCDEF0123456789ABCDEF/010013C00E930000/user1.dat', data: new Uint8Array([1, 2, 3]) },
   { name: 'nand/system/save/8000000000000010/su/avators/profiles.dat', data: new Uint8Array(70_000).map((_, i) => i * 7) },
   { name: 'nand/user/save/empty.bin', data: new Uint8Array() },
+  { name: 'sdmc/nxweb-save-test.txt', data: new Uint8Array([49]) },
 ];
 const zip = writeZip(files);
 const file = new File([zip], 'saves.zip');
@@ -45,13 +46,18 @@ assert.equal(savePathFor('0100f2c0115b6000/slot/0.sav', profile),
 assert.equal(savePathFor('__MACOSX/0100F2C0115B6000/._0.sav', profile), null);
 assert.equal(savePathFor('0100F2C0115B6000/.DS_Store', profile), null);
 assert.equal(savePathFor('readme.txt', profile), null);
+assert.equal(savePathFor('sdmc/nxweb-save-test.txt', null), 'sdmc/nxweb-save-test.txt');
+assert.equal(savePathFor('sdmc', null), null);
+assert.throws(() => savePathFor('sdmc/../keys/prod.keys', null), /unsafe/);
 assert.throws(() => savePathFor('0100F2C0115B6000/../../keys/prod.keys', profile), /unsafe/);
 assert.throws(() => savePathFor('0100F2C0115B6000/0.sav', undefined), /No user profile/);
 
 console.log('save archives OK');
 
 let snapshot = new Map();
+const slots = new Map();
 let aborts = 0;
+let transactions = 0;
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const originalIndexedDB = globalThis.indexedDB;
 const originalSetInterval = globalThis.setInterval;
@@ -65,8 +71,10 @@ globalThis.indexedDB = {
     queueMicrotask(() => {
       request.result = {
         close() {},
-        transaction() {
-          const pending = new Map(snapshot);
+        transaction(name) {
+          transactions++;
+          const source = name === 'slots' ? slots : snapshot;
+          const pending = new Map(source);
           let aborted = false;
           const read = result => {
             const request = {};
@@ -85,7 +93,7 @@ globalThis.indexedDB = {
           };
           setImmediate(() => {
             if (aborted) tx.onabort?.();
-            else { snapshot = pending; tx.oncomplete?.(); }
+            else { if (name !== 'slots') snapshot = pending; tx.oncomplete?.(); }
           });
           return tx;
         },
@@ -100,20 +108,35 @@ globalThis.clearInterval = () => {};
 console.warn = (...args) => warnings.push(args);
 
 try {
+  const titleId = '0100F2C0115B6000';
+  slots.set(1, { titleId, name: 'Test game', files: [[`nand/user/save/0000000000000000/${profile}/${titleId}/test.sav`, new Blob([new Uint8Array([7])])]] });
+  await assert.rejects(loadSlot(2, titleId), /empty/);
+  await assert.rejects(loadSlot(1, '0100000000000001'), /belongs to Test game/);
+  await assert.rejects(loadSlot(1, null), /belongs to Test game/);
+  assert.equal(snapshot.size, 0);
+  await loadSlot(1, titleId.toLowerCase());
+  assert.equal(snapshot.size, 2);
+  snapshot.clear();
+  await loadSlot(1);
+  assert.equal(snapshot.size, 2);
+  snapshot.clear();
   let saved;
   const contents = new Map();
+  const sdContents = new Map();
+  const contentFor = path => (path.includes('/sdmc/') ? sdContents : contents).get(path.split('/').at(-1));
   let unreadable = null;
   const FS = {
     readdir(dir) {
       if (dir === `${EDEN_DATA_ROOT}/nand/user/save`) return [...contents.keys()];
+      if (dir === `${EDEN_DATA_ROOT}/sdmc`) return [...sdContents.keys()];
       throw new Error('No directory');
     },
-    stat(path) { return { size: contents.get(path.split('/').at(-1)).length, mtime: 1, mode: 0 }; },
+    stat(path) { return { size: contentFor(path).length, mtime: 1, mode: 0 }; },
     isDir: () => false,
     readFile(path) {
       const name = path.split('/').at(-1);
       if (name === unreadable) throw new Error('Save read failed');
-      return contents.get(name);
+      return contentFor(path);
     },
   };
   const stop = watchSaves(() => FS, () => true, meta => { saved = meta; });
@@ -151,7 +174,73 @@ try {
   await poll();
   assert.equal(saved.files, 0);
   assert.equal(await restoreSaves({}), 0);
-  stop();
+  sdContents.set('nxweb-save-test.txt', new Uint8Array([49]));
+  await poll();
+  await poll();
+  assert.equal(saved.files, 1);
+  assert.deepEqual(new Uint8Array(await snapshot.get('sdmc/nxweb-save-test.txt').arrayBuffer()), new Uint8Array([49]));
+  const backup = await exportSaves();
+  snapshot.clear();
+  await importSaves(new File([backup], 'sdmc.zip'));
+  const sdRestored = new Map();
+  await restoreSaves({ mkdirTree() {}, writeFile: (path, data) => sdRestored.set(path, data) });
+  assert.deepEqual(sdRestored.get(`${EDEN_DATA_ROOT}/sdmc/nxweb-save-test.txt`), new Uint8Array([49]));
+  sdContents.clear();
+  await poll();
+  await poll();
+  await stop();
+  const lifecycle = new EventTarget();
+  lifecycle.document = new EventTarget();
+  lifecycle.document.visibilityState = 'visible';
+  let healthy = true;
+  const stopLifecycle = watchSaves(() => FS, () => healthy, meta => { saved = meta; }, 10_000, lifecycle);
+  const settle = async () => { await tick(); await tick(); };
+  sdContents.set('nxweb-save-test.txt', new Uint8Array([50]));
+  lifecycle.document.dispatchEvent(new Event('visibilitychange'));
+  await settle();
+  assert.equal(snapshot.has('sdmc/nxweb-save-test.txt'), false);
+  lifecycle.document.visibilityState = 'hidden';
+  const beforeHidden = transactions;
+  lifecycle.document.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(transactions, beforeHidden + 1, 'hidden flush must start its transaction before the event returns');
+  await settle();
+  assert.deepEqual(new Uint8Array(await snapshot.get('sdmc/nxweb-save-test.txt').arrayBuffer()), new Uint8Array([50]));
+  sdContents.set('nxweb-save-test.txt', new Uint8Array([51]));
+  lifecycle.dispatchEvent(new Event('pagehide'));
+  await settle();
+  assert.deepEqual(new Uint8Array(await snapshot.get('sdmc/nxweb-save-test.txt').arrayBuffer()), new Uint8Array([51]));
+  healthy = false;
+  sdContents.clear();
+  lifecycle.dispatchEvent(new Event('pagehide'));
+  await settle();
+  assert.equal(snapshot.has('sdmc/nxweb-save-test.txt'), true);
+  healthy = true;
+  unreadable = 'nxweb-save-test.txt';
+  sdContents.set(unreadable, new Uint8Array([52]));
+  lifecycle.dispatchEvent(new Event('pagehide'));
+  await settle();
+  assert.deepEqual(new Uint8Array(await snapshot.get('sdmc/nxweb-save-test.txt').arrayBuffer()), new Uint8Array([51]));
+  unreadable = null;
+  sdContents.clear();
+  lifecycle.dispatchEvent(new Event('pagehide'));
+  await stopLifecycle();
+  assert.equal(snapshot.has('sdmc/nxweb-save-test.txt'), false);
+  sdContents.set('late.txt', new Uint8Array([1]));
+  lifecycle.dispatchEvent(new Event('pagehide'));
+  await settle();
+  assert.equal(snapshot.has('sdmc/late.txt'), false);
+  const stopClear = watchSaves(() => FS, () => true, () => {}, 10_000, lifecycle);
+  lifecycle.dispatchEvent(new Event('pagehide'));
+  await clearSaves(stopClear);
+  assert.equal(snapshot.size, 0);
+  sdContents.set('later.txt', new Uint8Array([2]));
+  lifecycle.dispatchEvent(new Event('pagehide'));
+  await poll();
+  await poll();
+  await settle();
+  assert.equal(snapshot.size, 0);
+  await clearSaves();
+  await assert.rejects(clearSaves(() => Promise.reject(new Error('stop failed'))), /stop failed/);
 } finally {
   globalThis.indexedDB = originalIndexedDB;
   globalThis.setInterval = originalSetInterval;

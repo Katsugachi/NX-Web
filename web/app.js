@@ -33,6 +33,30 @@ import {
 } from './recovery.js';
 import { setupCompatibility } from './compat.js';
 import { setupDiagnostics } from './diagnostics.js';
+import { acquireSession } from './session-lock.js';
+
+let sessionOwned = false;
+const sessionNotice = document.createElement('section');
+sessionNotice.id = 'session-lock';
+sessionNotice.setAttribute('role', 'status');
+sessionNotice.setAttribute('aria-live', 'polite');
+document.body.append(sessionNotice);
+const sessionReady = acquireSession(status => {
+  sessionOwned = status === 'acquired';
+  document.getElementById('nx-app').inert = !sessionOwned;
+  sessionNotice.hidden = sessionOwned;
+  sessionNotice.textContent = status === 'blocked'
+    ? 'NX-Web is already open in another tab. Saves can only be used in one tab at a time, so close the other tab to play here.'
+    : status === 'error'
+      ? 'NX-Web could not secure this session. Reload the page to try again before playing.'
+      : 'Checking whether NX-Web is open in another tab…';
+});
+document.addEventListener('keydown', event => {
+  if (!sessionOwned) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+}, true);
 
 // DOM Elements
 const canvas = document.getElementById('canvas');
@@ -426,6 +450,7 @@ function initWasmCore() {
 }
 
 async function initWasmCoreOnce() {
+  if (!await sessionReady) return;
   checkIsolation();
   await loadRuntimeScript();
   await inspectWasmBinary();
@@ -673,6 +698,7 @@ async function hasNroHeader(file) {
 
 // Handle dropped or selected ROM file, or an archive holding one
 async function handleFile(file) {
+  if (!sessionOwned) return;
   if (!file) return;
   if (loadingRom || isRomLoaded) {
     log('ROM selection ignored: a game is already loading or loaded.', 'ui');
@@ -792,7 +818,7 @@ async function loadFile(file) {
       isRomLoaded = true;
       lastGameFile = file;
       bootedAt = performance.now();
-      stopSaveWatch?.();
+      await stopSaveWatch?.();
       stopSaveWatch = watchSaves(() => edenModule?.FS, () => isRunning && !crashed, showSavePoint);
       compat.startSession({ module: edenModule, rom, core: runningCore });
       dropZone.style.display = 'none';
@@ -1277,10 +1303,12 @@ document.getElementById('btn-crash-clear').addEventListener('click', async () =>
   refreshCrashReports();
 });
 document.getElementById('btn-saves-clear').addEventListener('click', async () => {
-  if (!confirm('Delete the in-game saves stored in this browser? This cannot be undone.')) return;
-  await clearSaves();
+  if (!confirm('Delete the in-game saves stored in this browser? Any running game will stop. This cannot be undone.')) return;
+  await clearSaves(stopSaveWatch);
+  stopSaveWatch = null;
   document.getElementById('save-point').textContent = 'None yet';
   showSavePoint(null);
+  if (isRomLoaded) location.reload();
 });
 const savesStatus = document.getElementById('saves-status');
 const savesImportInput = document.getElementById('saves-import-input');
@@ -1345,16 +1373,22 @@ btnLoadSlot.addEventListener('click', async () => {
   const slot = Number(slotSelect.value);
   const record = slots[slot - 1];
   if (!record) return;
+  if (isRomLoaded && record.titleId !== runningGame?.titleId) {
+    savesStatus.textContent = `Slot ${slot} belongs to ${record.name}. Stop the current game before loading another game's slot.`;
+    log(savesStatus.textContent, 'err');
+    return;
+  }
   const restart = isRomLoaded && lastGameFile;
   if (isRomLoaded && !confirm(`Restart the game from slot ${slot} (${record.name})? Progress since it was saved is lost.`)) return;
   // A running game would overwrite the loaded slot with its own saves at the next save point.
-  stopSaveWatch?.();
+  await stopSaveWatch?.();
   stopSaveWatch = null;
   try {
-    const { meta } = await loadSlot(slot);
+    const { meta } = await loadSlot(slot, isRomLoaded ? runningGame?.titleId ?? null : undefined);
     showSavePoint(meta);
   } catch (err) {
     savesStatus.textContent = `Could not load slot ${slot}: ${err.message}`;
+    log(savesStatus.textContent, 'err');
     if (isRomLoaded) stopSaveWatch = watchSaves(() => edenModule?.FS, () => isRunning && !crashed, showSavePoint);
     return;
   }
@@ -1385,7 +1419,7 @@ savesImportInput.addEventListener('change', async () => {
   // A running game would overwrite the import with its own saves at the next save point.
   if (isRomLoaded) {
     if (!confirm('Imported saves load when a game boots. Stop the running game and reload the page now? Progress since the last save point is lost.')) return;
-    stopSaveWatch?.();
+    await stopSaveWatch?.();
     stopSaveWatch = null;
   }
   const done = [];
@@ -1481,4 +1515,6 @@ inspectGpu();
 showVersion();
 
 // Initial boot (module scripts are deferred, so the DOM is already parsed)
-initWasmCore().then(resumeAfterCrash);
+sessionReady.then(acquired => {
+  if (acquired) initWasmCore().then(resumeAfterCrash);
+});

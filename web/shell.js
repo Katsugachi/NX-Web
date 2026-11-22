@@ -253,6 +253,10 @@ function hotkey(action) {
   else if (playing) ({ pause:$('toggle-pause'), save:$('btn-save-state'), load:$('btn-load-slot'), fullscreen:$('player-fullscreen') })[action]?.click();
 }
 window.addEventListener('keydown', event => {
+  if ($('nx-app').inert) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    return;
+  }
   if (rebinding) {
     event.preventDefault(); event.stopImmediatePropagation();
     if (event.repeat || event.key === 'Shift') return;

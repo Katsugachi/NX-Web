@@ -6,6 +6,7 @@ body::before { display:none; }
 #nx-app { width:100%; }
 [hidden],#bridge-elements { display:none !important; }
 body > :not(#nx-app) { display:none; }
+body > #session-lock { position:fixed; inset:0; z-index:1000; display:grid; place-content:center; padding:32px max(24px,calc((100vw - 560px) / 2)); background:var(--bg); color:var(--text); font-size:20px; line-height:1.6; text-align:center; }
 button,input,select { font:inherit; }
 a { color:inherit; }
 button { cursor:pointer; }

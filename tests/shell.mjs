@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { runInNewContext } from 'node:vm';
 import { recentGames, rememberGame, compatibilityProblems, runtimeProblem } from '../web/shell-model.js';
 import { ACTIONS, DEFAULT_BINDINGS, parseBindings, rebind, bindingKey, keyLabel, readBindings, writeBindings } from '../web/bindings.js';
 import { BUILD_CORES, activeCore } from '../web/cores.js';
@@ -38,4 +40,21 @@ assert.deepEqual(readBindings(),DEFAULT_BINDINGS);
 globalThis.window = new EventTarget();
 assert.equal(writeBindings(DEFAULT_BINDINGS),false);
 assert.equal(ACTIONS.filter(action=>!action.hotkey).length,25);
+const source = await readFile(new URL('../web/shell.js', import.meta.url), 'utf8');
+const handler = source.slice(source.indexOf("window.addEventListener('keydown', event => {"));
+const root = { inert:true };
+let rebindingRead = false;
+const scope = { window, $:()=>root, get rebinding() { rebindingRead = true; return null; } };
+runInNewContext(handler.slice(0, handler.indexOf('}, true);') + '}, true);'.length), scope);
+for (const code of ['Tab', 'Slash', 'F5', 'F8', 'KeyO']) {
+  const event = Object.assign(new Event('keydown', { cancelable:true }), { code });
+  window.dispatchEvent(event);
+  assert.equal(event.defaultPrevented, true, `${code} is blocked before shell hotkeys`);
+}
+assert.equal(rebindingRead, false);
+root.inert = false;
+const allowed = Object.assign(new Event('keydown', { cancelable:true }), { altKey:true });
+window.dispatchEvent(allowed);
+assert.equal(allowed.defaultPrevented, false);
+assert.equal(rebindingRead, true);
 console.log('NX-Web shell: recents, compatibility failures, remapping, conflicts and blocked storage OK');
