@@ -11,6 +11,10 @@ assert.equal(homebrewRomPath('quake.nro'), `${EDEN_DATA_ROOT}/sdmc/switch/quake/
 assert.equal(homebrewRomPath('archive/quake.nro'), `${EDEN_DATA_ROOT}/sdmc/switch/quake/quake.nro`);
 assert.equal(homebrewRomPath('my app.NRO'), `${EDEN_DATA_ROOT}/sdmc/switch/my app/my app.NRO`);
 assert.equal(homebrewRomPath('archive/game.nsp'), '/roms/game.nsp');
+assert.equal(homebrewRomPath('./game.nsp'), '/roms/game.nsp');
+assert.equal(homebrewRomPath('../archive//game.nsp'), '/roms/game.nsp');
+assert.equal(homebrewRomPath('./switch/x/x.nro'), `${EDEN_DATA_ROOT}/sdmc/switch/x/x.nro`);
+assert.equal(homebrewRomPath('switch//x/./x.nro'), `${EDEN_DATA_ROOT}/sdmc/switch/x/x.nro`);
 assert.throws(() => homebrewRomPath(''), /unsafe/);
 assert.throws(() => homebrewRomPath('switch/../game.nro'), /unsafe/);
 const asset = 'switch/quake/id1/pak0.pak';

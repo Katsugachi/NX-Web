@@ -15,9 +15,11 @@ function safeParts(name) {
 }
 
 export function homebrewRomPath(name) {
-  const parts = safeParts(name);
-  const filename = parts.at(-1);
+  const normalized = name.split('/').filter(part => part && part !== '.');
+  const filename = normalized.at(-1);
+  if (!filename) throw new Error(`${name}: unsafe homebrew asset path`);
   if (!/\.nro$/i.test(filename)) return `/roms/${filename}`;
+  const parts = safeParts(normalized.join('/'));
   const sdPath = parts[0] === 'switch' ? parts : ['switch', filename.slice(0, -4), filename];
   return `${EDEN_DATA_ROOT}/sdmc/${sdPath.join('/')}`;
 }
