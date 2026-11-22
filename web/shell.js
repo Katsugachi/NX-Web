@@ -191,6 +191,7 @@ $('browse-btn').innerHTML = `${icon('open')}<span>Open game</span>`;
 const formats = document.createElement('span'); formats.className = 'formats'; formats.textContent = '.nro / .nsp / .xci / archives'; $('drop-zone').querySelector('.drop-prompt').append(formats);
 $('launch-status').append($('rom-status')); $('rom-status').textContent = '';
 $('player-stage').append($('screen-stage')); $('player-title').append($('title-name')); $('player-fps').append($('fps-counter'));
+document.querySelector('[data-widget="emulation"]').append($('btn-reset'));
 for (const id of ['save-state-slot', 'btn-save-state', 'btn-load-slot']) $('toolbar-slot').append($(id));
 for (const [id, name, label] of [['btn-save-state','save','Save slot'],['btn-load-slot','load','Load slot']]) {
   $(id).className = 'icon-button'; $(id).innerHTML = icon(name); $(id).setAttribute('aria-label', label);

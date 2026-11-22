@@ -200,6 +200,10 @@ async function storeSaves(FS, files, connection) {
   return meta;
 }
 
+export function persistSaves(FS) {
+  return storeSaves(FS, listSaveFiles(FS));
+}
+
 export async function savePointInfo() {
   return withStore(SAVES, 'readonly', store => requestResult(store.get(META_KEY)));
 }
