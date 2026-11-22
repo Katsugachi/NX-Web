@@ -120,7 +120,8 @@ export async function savePointInfo() {
   return withStore(SAVES, 'readonly', store => requestResult(store.get(META_KEY)));
 }
 
-export async function clearSaves() {
+export async function clearSaves(stopWatching) {
+  await stopWatching?.();
   await withStore(SAVES, 'readwrite', store => store.clear());
 }
 

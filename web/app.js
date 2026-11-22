@@ -1303,10 +1303,12 @@ document.getElementById('btn-crash-clear').addEventListener('click', async () =>
   refreshCrashReports();
 });
 document.getElementById('btn-saves-clear').addEventListener('click', async () => {
-  if (!confirm('Delete the in-game saves stored in this browser? This cannot be undone.')) return;
-  await clearSaves();
+  if (!confirm('Delete the in-game saves stored in this browser? Any running game will stop. This cannot be undone.')) return;
+  await clearSaves(stopSaveWatch);
+  stopSaveWatch = null;
   document.getElementById('save-point').textContent = 'None yet';
   showSavePoint(null);
+  if (isRomLoaded) location.reload();
 });
 const savesStatus = document.getElementById('saves-status');
 const savesImportInput = document.getElementById('saves-import-input');

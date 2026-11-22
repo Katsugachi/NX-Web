@@ -7,7 +7,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { readZipEntries, writeZip } from '../web/system-files.js';
-import { savePathFor, restoreSaves, watchSaves, savePointInfo, exportSaves, importSaves, loadSlot } from '../web/recovery.js';
+import { savePathFor, restoreSaves, watchSaves, savePointInfo, exportSaves, importSaves, loadSlot, clearSaves } from '../web/recovery.js';
 import { EDEN_DATA_ROOT } from '../web/system-files.js';
 
 const files = [
@@ -225,6 +225,18 @@ try {
   lifecycle.dispatchEvent(new Event('pagehide'));
   await settle();
   assert.equal(snapshot.has('sdmc/late.txt'), false);
+  const stopClear = watchSaves(() => FS, () => true, () => {}, 10_000, lifecycle);
+  lifecycle.dispatchEvent(new Event('pagehide'));
+  await clearSaves(stopClear);
+  assert.equal(snapshot.size, 0);
+  sdContents.set('later.txt', new Uint8Array([2]));
+  lifecycle.dispatchEvent(new Event('pagehide'));
+  await poll();
+  await poll();
+  await settle();
+  assert.equal(snapshot.size, 0);
+  await clearSaves();
+  await assert.rejects(clearSaves(() => Promise.reject(new Error('stop failed'))), /stop failed/);
 } finally {
   globalThis.indexedDB = originalIndexedDB;
   globalThis.setInterval = originalSetInterval;
