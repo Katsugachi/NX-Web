@@ -333,6 +333,17 @@ try {
   journalStorage.set(journalKey, raw);
   await clearSaves();
   assert.equal(journalStorage.has(journalKey), false);
+  const otherGamePath = `nand/user/save/0000000000000000/${profile}/0100000000000001/recent.sav`;
+  for (const manage of [() => importSaves(new File([backup], 'import.zip')), () => loadSlot(1)]) {
+    journalStorage.set(journalKey, JSON.stringify({ time:Date.now(), changes:[[otherGamePath, 'CQ==']] }));
+    await manage();
+    assert.equal(journalStorage.has(journalKey), false, 'pre-boot management merges and clears the journal');
+    assert.deepEqual(new Uint8Array(await snapshot.get(otherGamePath).arrayBuffer()), new Uint8Array([9]));
+    const afterManagement = new Map();
+    await restoreSaves({ mkdirTree() {}, writeFile: (path, data) => afterManagement.set(path, data) });
+    assert.deepEqual(afterManagement.get(`${EDEN_DATA_ROOT}/${otherGamePath}`), new Uint8Array([9]), 'other games retain journaled progress after pre-boot management');
+    await clearSaves();
+  }
 } finally {
   globalThis.indexedDB = originalIndexedDB;
   globalThis.setInterval = originalSetInterval;

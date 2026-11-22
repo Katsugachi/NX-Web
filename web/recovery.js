@@ -125,8 +125,7 @@ function writeJournal(FS, files, stored) {
   } catch (err) { console.warn('Save journal skipped:', err); }
 }
 
-/// Writes the stored save point into the engine filesystem. Returns the number of files.
-export async function restoreSaves(FS) {
+async function mergeSaveJournal() {
   let entries = await withStore(SAVES, 'readonly', async store => {
     const [keys, values] = await Promise.all([requestResult(store.getAllKeys()), requestResult(store.getAll())]);
     return keys.map((key, i) => [key, values[i]]);
@@ -159,6 +158,12 @@ export async function restoreSaves(FS) {
     entries = [...merged];
     clearJournal(raw);
   } else if (journal) clearJournal(raw);
+  return entries;
+}
+
+/// Writes the stored save point into the engine filesystem. Returns the number of files.
+export async function restoreSaves(FS) {
+  const entries = await mergeSaveJournal();
   let count = 0;
   for (const [path, data] of entries) {
     if (path === META_KEY) continue;
@@ -241,6 +246,7 @@ export function savePathFor(name, profile) {
 /// Merges the saves in a ZIP into the stored save point; they are written into the game on the
 /// next boot. Returns { files, bytes, titles }.
 export async function importSaves(file) {
+  await mergeSaveJournal();
   const existing = await storedSaves();
   const profile = existing.map(([key]) => PROFILE_SAVE.exec(key)?.[1]).find(Boolean);
   const imported = [];
@@ -309,6 +315,7 @@ export async function listSlots() {
 /// Replaces the game's saves in the stored save point with `slot`. Returns the slot record and
 /// the new save point metadata.
 export async function loadSlot(slot, runningTitleId) {
+  await mergeSaveJournal();
   const record = await withStore(SLOTS, 'readonly', store => requestResult(store.get(slot)));
   if (!record) throw new Error(`Slot ${slot} is empty`);
   if (runningTitleId !== undefined && record.titleId !== runningTitleId?.toUpperCase()) {
