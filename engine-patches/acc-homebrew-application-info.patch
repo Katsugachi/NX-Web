@@ -1,0 +1,24 @@
+diff --git a/src/core/hle/service/acc/acc.cpp b/src/core/hle/service/acc/acc.cpp
+index d68b6bd..e57cbcd 100644
+--- a/src/core/hle/service/acc/acc.cpp
++++ b/src/core/hle/service/acc/acc.cpp
+@@ -953,9 +953,17 @@ Result Module::Interface::InitializeApplicationInfoBase() {
+     // TODO(ogniK): This should be changed to reflect the target process for when we have multiple
+     // processes emulated. As we don't actually have pid support we should assume we're just using
+     // our own process
++    const auto program_id = system.GetApplicationProcessProgramID();
++    if (program_id == 0) {
++        // Homebrew NROs run with default metadata and no program ID, so ARP never registers
++        // them. On hardware they run inside a hosting title, so treat them as digital.
++        LOG_WARNING(Service_ACC, "Application has no program ID, assuming homebrew");
++        application_info.application_type = ApplicationType::Digital;
++        return ResultSuccess;
++    }
++
+     Glue::ApplicationLaunchProperty launch_property{};
+-    const auto result = system.GetARPManager().GetLaunchProperty(
+-        &launch_property, system.GetApplicationProcessProgramID());
++    const auto result = system.GetARPManager().GetLaunchProperty(&launch_property, program_id);
+ 
+     if (result != ResultSuccess) {
+         LOG_ERROR(Service_ACC, "Failed to get launch property");

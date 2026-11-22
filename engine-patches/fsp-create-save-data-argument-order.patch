@@ -1,0 +1,34 @@
+diff --git a/src/core/hle/service/filesystem/fsp/fsp_srv.cpp b/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
+index 79191ee..0480c17 100644
+--- a/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
++++ b/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
+@@ -236,10 +236,10 @@ Result FSP_SRV::OpenSdCardFileSystem(OutInterface<IFileSystem> out_interface) {
+     R_SUCCEED();
+ }
+ 
+-Result FSP_SRV::CreateSaveDataFileSystem(FileSys::SaveDataCreationInfo save_create_struct,
+-                                         FileSys::SaveDataAttribute save_struct, u128 uid) {
+-    LOG_DEBUG(Service_FS, "called save_struct = {}, uid = {:016X}{:016X}", save_struct.DebugInfo(),
+-              uid[1], uid[0]);
++Result FSP_SRV::CreateSaveDataFileSystem(FileSys::SaveDataAttribute save_struct,
++                                         FileSys::SaveDataCreationInfo save_create_struct,
++                                         u128 meta) {
++    LOG_DEBUG(Service_FS, "called save_struct = {}", save_struct.DebugInfo());
+ 
+     FileSys::VirtualDir save_data_dir{};
+     R_RETURN(save_data_controller->CreateSaveData(&save_data_dir, FileSys::SaveDataSpaceId::User,
+diff --git a/src/core/hle/service/filesystem/fsp/fsp_srv.h b/src/core/hle/service/filesystem/fsp/fsp_srv.h
+index 17a0e97..1c43ab7 100644
+--- a/src/core/hle/service/filesystem/fsp/fsp_srv.h
++++ b/src/core/hle/service/filesystem/fsp/fsp_srv.h
+@@ -58,8 +58,8 @@ private:
+     Result OpenFileSystemWithPatch(OutInterface<IFileSystem> out_interface,
+                                    FileSystemProxyType type, u64 open_program_id);
+     Result OpenSdCardFileSystem(OutInterface<IFileSystem> out_interface);
+-    Result CreateSaveDataFileSystem(FileSys::SaveDataCreationInfo save_create_struct,
+-                                    FileSys::SaveDataAttribute save_struct, u128 uid);
++    Result CreateSaveDataFileSystem(FileSys::SaveDataAttribute save_struct,
++                                    FileSys::SaveDataCreationInfo save_create_struct, u128 meta);
+     Result CreateSaveDataFileSystemBySystemSaveDataId(
+         FileSys::SaveDataAttribute save_struct, FileSys::SaveDataCreationInfo save_create_struct);
+     Result CreateSaveDataFileSystemWithCreationInfo2(
