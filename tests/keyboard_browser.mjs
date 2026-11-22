@@ -37,6 +37,9 @@ try {
         assert.deepEqual(shortcuts['Plus / Minus'], [mode === 'reset' ? 'Enter' : 'V', 'Backspace']);
         assert.deepEqual(shortcuts['Open game · library only'], ['O']);
         assert.deepEqual(shortcuts['L / R'], ['Q', 'O']);
+        assert.deepEqual(shortcuts['Stage fullscreen'], ['Alt+Enter']);
+        assert.deepEqual(shortcuts['Picture-in-picture'], ['Alt+P']);
+        assert.deepEqual(shortcuts['Toggle speed limit'], ['Alt+U']);
         await page.$eval('#file-input', input => input.addEventListener('click', event => {
           event.preventDefault();
           input.dataset.opened = 'true';
