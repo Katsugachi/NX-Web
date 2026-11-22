@@ -10,6 +10,7 @@ import {
 import { setupInput } from './input.js';
 import { mountRom } from './rom-file.js';
 import { mountBrowserRom } from './browser-rom.js';
+import { bundledSdFiles, mountBundledSdFiles } from './homebrew-bundle.js';
 import { setupAudio } from './audio.js';
 import { setupCamera } from './camera.js';
 import { createFrameWatchdog } from './frame-watchdog.js';
@@ -18,6 +19,7 @@ import { isArchive, openArchive, storedRomSlice } from './archive.js';
 import { BUILD_CORES, activeCore, coreBackend, coreEnvironment, findCore, runtimeBase, storeCore } from './cores.js';
 import {
   restoreSaves,
+  trackBundledSdFiles,
   persistSaves,
   watchSaves,
   savePointInfo,
@@ -697,15 +699,19 @@ const baseName = (name) => name.split('/').pop();
 // Finds the first game in a ZIP, 7z, RAR or other archive, or returns null if there is none.
 async function findRomInArchive(file) {
   if (file.name.toLowerCase().endsWith('.zip')) {
+    let entries;
     try {
-      const roms = (await readZipEntries(file)).filter(e => hasExtension(e.name, ARCHIVED_ROM_EXTENSIONS));
+      entries = await readZipEntries(file);
+    } catch (err) {
+      log(`${file.name}: ${err.message}; retrying with the archive decoder.`, 'ui');
+    }
+    if (entries) {
+      const roms = entries.filter(e => hasExtension(e.name, ARCHIVED_ROM_EXTENSIONS));
       if (roms.length === 0) return null;
       if (roms[0].supported) {
         if (roms.length > 1) log(`${file.name} holds ${roms.length} ROMs; loading ${roms[0].name}.`, 'ui');
-        return { ...roms[0], name: baseName(roms[0].name) };
+        return { ...roms[0], name: baseName(roms[0].name), sdFiles: bundledSdFiles(entries, roms) };
       }
-    } catch (err) {
-      log(`${file.name}: ${err.message}; retrying with the archive decoder.`, 'ui');
     }
   }
   const { rom } = await openArchive(file, { romExtensions: ARCHIVED_ROM_EXTENSIONS, systemExtensions: [] });
@@ -813,6 +819,7 @@ async function loadFile(file) {
 
     // Raw compressed streams (game.nsp.xz) do not record the size, so progress shows bytes only.
     loader.begin(Math.max(rom.size, 0));
+    let bundle;
     try {
       wasmStatusText.textContent = 'Mounting keys & firmware...';
       setRomStatus('Mounting keys & firmware...');
@@ -824,6 +831,13 @@ async function loadFile(file) {
         return 0;
       });
       if (restored) log(`Restored ${restored} in-game save files from the last save point.`, 'ui');
+
+      if (rom.sdFiles?.length) {
+        setRomStatus('Mounting bundled homebrew assets...');
+        bundle = await mountBundledSdFiles(edenModule.FS, rom.sdFiles);
+        trackBundledSdFiles(edenModule.FS, bundle.installed);
+        log(`Mounted ${bundle.installed.length} bundled SD card files.`, 'ui');
+      }
 
       wasmStatusText.textContent = `Reading ${rom.name}...`;
       setRomStatus(`Reading ${rom.name}...`);
@@ -858,6 +872,10 @@ async function loadFile(file) {
     } catch (err) {
       browserRom?.close();
       browserRom = null;
+      if (bundle) {
+        trackBundledSdFiles(edenModule.FS, []);
+        bundle.close();
+      }
       console.error('Failed to load ROM:', err.stack || err.message);
       loader.fail();
       wasmStatusText.textContent = 'ROM Load Failed';

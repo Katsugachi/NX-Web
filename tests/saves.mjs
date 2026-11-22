@@ -7,7 +7,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { readZipEntries, writeZip } from '../web/system-files.js';
-import { savePathFor, restoreSaves, watchSaves, savePointInfo, exportSaves, importSaves, loadSlot, clearSaves } from '../web/recovery.js';
+import { savePathFor, restoreSaves, trackBundledSdFiles, persistSaves, watchSaves, savePointInfo, exportSaves, importSaves, loadSlot, clearSaves } from '../web/recovery.js';
 import { EDEN_DATA_ROOT } from '../web/system-files.js';
 
 const files = [
@@ -195,6 +195,13 @@ try {
   const sdRestored = new Map();
   await restoreSaves({ mkdirTree() {}, writeFile: (path, data) => sdRestored.set(path, data) });
   assert.deepEqual(sdRestored.get(`${EDEN_DATA_ROOT}/sdmc/nxweb-save-test.txt`), new Uint8Array([49]));
+  sdContents.set('asset.dat', new Uint8Array([20]));
+  trackBundledSdFiles(FS, ['sdmc/asset.dat']);
+  await persistSaves(FS);
+  assert.equal(snapshot.has('sdmc/asset.dat'), false);
+  sdContents.set('asset.dat', new Uint8Array([20, 21]));
+  await persistSaves(FS);
+  assert.equal(snapshot.has('sdmc/asset.dat'), true);
   sdContents.clear();
   await poll();
   await poll();
