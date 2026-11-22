@@ -1,0 +1,89 @@
+--- a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
+@@ -24,6 +24,7 @@
+ #include "video_core/renderer_webgpu/wgpu_pipeline_cache.h"
+ #include "video_core/renderer_webgpu/wgpu_stats.h"
+ #include "video_core/renderer_webgpu/wgpu_thread.h"
++#include "video_core/renderer_webgpu/wgpu_vertex_layout.h"
+ #include "video_core/shader_environment.h"
+ #include "video_core/surface.h"
+ #include "video_core/textures/texture.h"
+@@ -227,13 +228,6 @@
+     const wgpu::VertexFormat format =
+         MaxwellToWGPU::VertexFormat(attribute.Type(), attribute.Size(), components);
+     if (format == MaxwellToWGPU::INVALID_VERTEX_FORMAT) {
+-        return 0;
+-    }
+-    const u32 stride = state.vertex_strides[attribute.buffer];
+-    if (stride != 0 && attribute.offset + MaxwellToWGPU::VertexFormatSize(format) > stride) {
+-        return 0;
+-    }
+-    if (attribute.offset % 4 != 0 && MaxwellToWGPU::VertexFormatSize(format) >= 4) {
+         return 0;
+     }
+     return components;
+@@ -641,14 +635,31 @@
+         }
+ 
+         // Guest vertex buffers the pipeline reads take WebGPU's vertex buffer slots in order; the
+-        // shader fetches the ones past the last slot, and those with strides WebGPU cannot
+-        // describe (not a multiple of 4), from storage buffers.
++        // shader fetches the ones past the last slot, and layouts WebGPU cannot describe,
++        // from storage buffers.
+         std::array<bool, Maxwell::NumVertexArrays> buffer_read{};
++        std::array<bool, Maxwell::NumVertexArrays> buffer_pull{};
+         for (size_t index = 0; index < Maxwell::NumVertexAttributes; ++index) {
+             const auto& attribute = key.state.attributes[index];
+             if (attribute.enabled && stage_infos[0].loads.Generic(index) &&
+                 ProvidedComponents(key.state, index) != 0) {
+                 buffer_read[attribute.buffer] = true;
++                u8 components{};
++                const auto format = MaxwellToWGPU::VertexFormat(attribute.Type(), attribute.Size(),
++                                                               components);
++                const u32 stride = key.state.vertex_strides[attribute.buffer];
++                const u32 size = MaxwellToWGPU::VertexFormatSize(format);
++                if (NeedsVertexPulling(stride, attribute.offset, size)) {
++                    buffer_pull[attribute.buffer] = true;
++                    LOG_INFO(Render, "Pulling vertex attribute {}: enabled {} type {} size {} "
++                                     "format {} buffer {} offset {} stride {} bytes {} "
++                                     "past_stride {} unaligned {}",
++                             index, attribute.enabled.Value(), static_cast<u32>(attribute.Type()),
++                             static_cast<u32>(attribute.Size()), static_cast<u32>(format),
++                             attribute.buffer.Value(), attribute.offset.Value(), stride, size,
++                             stride != 0 && attribute.offset + size > stride,
++                             attribute.offset % std::min(4u, size) != 0);
++                }
+             }
+         }
+         pulled_buffers.clear();
+@@ -657,7 +668,7 @@
+             if (!buffer_read[buffer]) {
+                 continue;
+             }
+-            if (key.state.vertex_strides[buffer] % 4 != 0 ||
++            if (buffer_pull[buffer] ||
+                 num_read++ >= cache.max_vertex_buffers) {
+                 pulled_buffers.push_back(buffer);
+             }
+--- /dev/null
++++ b/src/video_core/renderer_webgpu/wgpu_vertex_layout.h
+@@ -0,0 +1,19 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++
++namespace WebGPU {
++
++constexpr bool NeedsVertexPulling(std::uint32_t stride, std::uint32_t offset,
++                                  std::uint32_t size) {
++    if (size == 0) {
++        return false;
++    }
++    return stride % 4 != 0 || offset % std::min(4u, size) != 0 ||
++           (stride != 0 && (offset > stride || size > stride - offset));
++}
++
++} // namespace WebGPU
