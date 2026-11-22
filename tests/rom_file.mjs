@@ -6,6 +6,7 @@ const block = 4 * 1024 * 1024;
 const input = Uint8Array.from({ length: block * 2 + 19 }, (_, i) => i * 13 % 251);
 const FS = {
   ErrnoError: class extends Error {},
+  analyzePath() { return { exists: false }; },
   create() { return this.node = { stream_ops: {}, node_ops: {} }; },
 };
 const rom = (parts, size = input.length) => ({
@@ -38,4 +39,28 @@ const failure = { name: 'bad.nsp', size: -1, stream: async () => new ReadableStr
 }) };
 await assert.rejects(mountRom(FS, '/roms/bad.nsp', failure, () => { throw new Error('write failure'); }), /write failure/);
 assert.equal(cancelled, true);
+const path = '/sdmc/switch/app/app.nro';
+const files = new Map([[path, { restored: true }]]);
+const replacingFS = {
+  ErrnoError: FS.ErrnoError,
+  analyzePath: path => ({ exists: files.has(path) }),
+  unlink: path => files.delete(path),
+  create(path) {
+    assert.equal(files.has(path), false, 'the restored NRO must be removed before creation');
+    const node = { stream_ops: {}, node_ops: {} };
+    files.set(path, node);
+    return node;
+  },
+};
+const restored = files.get(path);
+await assert.rejects(mountRom(replacingFS, path, rom([input], input.length + 1)), /truncated/);
+assert.equal(files.get(path), restored, 'a failed read must keep the restored NRO');
+await mountRom(replacingFS, path, rom([input]));
+const target = new Uint8Array(4);
+assert.equal(files.get(path).stream_ops.read(null, target, 0, 4, 0), 4);
+assert.deepEqual(target, input.subarray(0, 4));
+await mountRom(replacingFS, path, rom([], 0));
+assert.equal(files.get(path).usedBytes, 0);
+replacingFS.unlink = () => { throw new Error('unlink failed'); };
+await assert.rejects(mountRom(replacingFS, path, rom([], 0)), /unlink failed/);
 console.log('ROM block reads, boundaries, EOF, truncation and cancellation OK');

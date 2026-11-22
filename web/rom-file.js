@@ -46,6 +46,7 @@ export async function mountRom(FS, path, rom, onProgress = () => {}) {
   }
   if (filled) blocks.push(block.subarray(0, filled));
 
+  if (FS.analyzePath(path).exists) FS.unlink(path);
   const node = FS.create(path, 0o444);
   node.usedBytes = bytes;
   const readOnly = () => { throw new FS.ErrnoError(63); }; // EPERM
