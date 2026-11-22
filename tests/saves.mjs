@@ -374,6 +374,38 @@ try {
   assert.equal(afterDeletion.has(`${EDEN_DATA_ROOT}/sdmc/in-flight.txt`), false);
   assert.equal(snapshot.has('sdmc/in-flight.txt'), false);
   assert.equal(journalStorage.has(journalKey), false);
+
+  await clearSaves();
+  const recoveryFiles = new Map();
+  const recoveryFS = {
+    mkdirTree() {},
+    writeFile: (path, data) => recoveryFiles.set(path.split('/').at(-1), data),
+    readdir(dir) { return dir === `${EDEN_DATA_ROOT}/sdmc` ? [...recoveryFiles.keys()] : []; },
+    stat(path) { return { size:recoveryFiles.get(path.split('/').at(-1)).length, mtime:1, mode:0 }; },
+    isDir: () => false,
+    readFile: path => recoveryFiles.get(path.split('/').at(-1)),
+  };
+  journalStorage.set(journalKey, JSON.stringify({ time:Date.now(), changes:[['sdmc/recovered.txt', 'CQ==']] }));
+  failTransaction = true;
+  await restoreSaves(recoveryFS);
+  const stopRecovery = watchSaves(() => recoveryFS, () => true, () => {}, 2000, lifecycle);
+  await settle();
+  failTransaction = true;
+  const beforeRetry = transactions;
+  await poll();
+  assert.equal(transactions, beforeRetry + 1, 'first poll retries storing the recovered files');
+  assert.equal(snapshot.has('sdmc/recovered.txt'), false);
+  recoveryFiles.set('other.txt', new Uint8Array([2]));
+  failTransaction = true;
+  lifecycle.dispatchEvent(new Event('pagehide'));
+  assert.deepEqual(JSON.parse(journalStorage.get(journalKey)).changes, [
+    ['sdmc/recovered.txt', 'CQ=='],
+    ['sdmc/other.txt', 'Ag=='],
+  ], 'replacement journal retains recovered progress while database writes keep failing');
+  await stopRecovery();
+  assert.equal(snapshot.has('sdmc/recovered.txt'), false);
+  assert.equal(journalStorage.has(journalKey), true);
+  await clearSaves();
 } finally {
   globalThis.indexedDB = originalIndexedDB;
   globalThis.setInterval = originalSetInterval;

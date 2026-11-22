@@ -127,6 +127,7 @@ function writeJournal(FS, files, stored, inFlight) {
 }
 
 async function mergeSaveJournal(allowWritebackFailure = false) {
+  let writebackFailed = false;
   let entries = await withStore(SAVES, 'readonly', async store => {
     const [keys, values] = await Promise.all([requestResult(store.getAllKeys()), requestResult(store.getAll())]);
     return keys.map((key, i) => [key, values[i]]);
@@ -161,15 +162,16 @@ async function mergeSaveJournal(allowWritebackFailure = false) {
       clearJournal(raw);
     } catch (err) {
       if (!allowWritebackFailure) throw err;
+      writebackFailed = true;
       console.warn('Save journal writeback failed; recovery will retry:', err);
     }
   } else if (journal) clearJournal(raw);
-  return entries;
+  return { entries, writebackFailed };
 }
 
 /// Writes the stored save point into the engine filesystem. Returns the number of files.
 export async function restoreSaves(FS) {
-  const entries = await mergeSaveJournal(true);
+  const { entries, writebackFailed } = await mergeSaveJournal(true);
   let count = 0;
   for (const [path, data] of entries) {
     if (path === META_KEY) continue;
@@ -178,7 +180,7 @@ export async function restoreSaves(FS) {
     FS.writeFile(full, new Uint8Array(await data.arrayBuffer()));
     count++;
   }
-  restoredSignatures.set(FS, fileSignatures(listSaveFiles(FS)));
+  restoredSignatures.set(FS, writebackFailed ? new Map() : fileSignatures(listSaveFiles(FS)));
   return count;
 }
 
