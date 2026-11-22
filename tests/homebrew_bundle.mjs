@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import assert from 'node:assert/strict';
-import { bundledSdFiles, mountBundledSdFiles } from '../web/homebrew-bundle.js';
+import { bundledSdFiles, homebrewRomPath, mountBundledSdFiles } from '../web/homebrew-bundle.js';
 import { EDEN_DATA_ROOT, readZipEntries, writeZip } from '../web/system-files.js';
 
 const rom = 'switch/quake/quake.nro';
+assert.equal(homebrewRomPath(rom), `${EDEN_DATA_ROOT}/sdmc/switch/quake/quake.nro`);
+assert.equal(homebrewRomPath('switch/custom/engine.nro'), `${EDEN_DATA_ROOT}/sdmc/switch/custom/engine.nro`);
+assert.equal(homebrewRomPath('quake.nro'), `${EDEN_DATA_ROOT}/sdmc/switch/quake/quake.nro`);
+assert.equal(homebrewRomPath('archive/quake.nro'), `${EDEN_DATA_ROOT}/sdmc/switch/quake/quake.nro`);
+assert.equal(homebrewRomPath('my app.NRO'), `${EDEN_DATA_ROOT}/sdmc/switch/my app/my app.NRO`);
+assert.equal(homebrewRomPath('archive/game.nsp'), '/roms/game.nsp');
+assert.throws(() => homebrewRomPath(''), /unsafe/);
+assert.throws(() => homebrewRomPath('switch/../game.nro'), /unsafe/);
 const asset = 'switch/quake/id1/pak0.pak';
 const config = 'switch/quake/id1/config.cfg';
 const data = Uint8Array.of(1, 2, 3);

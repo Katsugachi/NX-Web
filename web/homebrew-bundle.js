@@ -14,6 +14,14 @@ function safeParts(name) {
   return parts;
 }
 
+export function homebrewRomPath(name) {
+  const parts = safeParts(name);
+  const filename = parts.at(-1);
+  if (!/\.nro$/i.test(filename)) return `/roms/${filename}`;
+  const sdPath = parts[0] === 'switch' ? parts : ['switch', filename.slice(0, -4), filename];
+  return `${EDEN_DATA_ROOT}/sdmc/${sdPath.join('/')}`;
+}
+
 export function bundledSdFiles(entries, roms) {
   if (roms.length !== 1 || !/\.nro$/i.test(roms[0].name)) return [];
   const name = roms[0].name;
