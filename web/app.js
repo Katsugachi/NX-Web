@@ -818,7 +818,7 @@ async function loadFile(file) {
       isRomLoaded = true;
       lastGameFile = file;
       bootedAt = performance.now();
-      stopSaveWatch?.();
+      await stopSaveWatch?.();
       stopSaveWatch = watchSaves(() => edenModule?.FS, () => isRunning && !crashed, showSavePoint);
       compat.startSession({ module: edenModule, rom, core: runningCore });
       dropZone.style.display = 'none';
@@ -1374,7 +1374,7 @@ btnLoadSlot.addEventListener('click', async () => {
   const restart = isRomLoaded && lastGameFile;
   if (isRomLoaded && !confirm(`Restart the game from slot ${slot} (${record.name})? Progress since it was saved is lost.`)) return;
   // A running game would overwrite the loaded slot with its own saves at the next save point.
-  stopSaveWatch?.();
+  await stopSaveWatch?.();
   stopSaveWatch = null;
   try {
     const { meta } = await loadSlot(slot);
@@ -1411,7 +1411,7 @@ savesImportInput.addEventListener('change', async () => {
   // A running game would overwrite the import with its own saves at the next save point.
   if (isRomLoaded) {
     if (!confirm('Imported saves load when a game boots. Stop the running game and reload the page now? Progress since the last save point is lost.')) return;
-    stopSaveWatch?.();
+    await stopSaveWatch?.();
     stopSaveWatch = null;
   }
   const done = [];

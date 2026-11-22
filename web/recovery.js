@@ -253,33 +253,49 @@ export async function clearSlot(slot) {
 
 /// Polls the save folders while `healthy()` holds and stores a save point once a change has
 /// settled. Returns a function that stops watching.
-export function watchSaves(getFS, healthy, onSaved, intervalMs = 10_000) {
+export function watchSaves(getFS, healthy, onSaved, intervalMs = 10_000, lifecycle = globalThis) {
   const initialFS = getFS();
   let stored = initialFS ? signature(listSaveFiles(initialFS)) : null;
   let pending = null;
-  let busy = false;
-  const timer = setInterval(async () => {
+  let busy = null;
+  let active = true;
+  const flush = (immediate = false) => {
+    if (!active) return Promise.resolve();
+    if (busy) return immediate ? busy.then(() => flush(true)) : busy;
     const FS = getFS();
-    if (busy || !FS || !healthy()) return;
-    busy = true;
-    try {
-      const files = listSaveFiles(FS);
-      const sig = signature(files);
-      if (stored === null) {
-        // The first poll after boot only records what was restored.
-        stored = sig;
-      } else if (sig !== stored && sig === pending) {
-        onSaved(await storeSaves(FS, files));
-        stored = sig;
+    if (!FS || !healthy()) return Promise.resolve();
+    busy = (async () => {
+      try {
+        const files = listSaveFiles(FS);
+        const sig = signature(files);
+        if (immediate || (sig !== stored && sig === pending)) {
+          onSaved(await storeSaves(FS, files));
+          stored = sig;
+        } else if (stored === null) {
+          // The first poll after boot only records what was restored.
+          stored = sig;
+        }
+        pending = sig;
+      } catch (err) {
+        console.warn('Save point failed:', err);
       }
-      pending = sig;
-    } catch (err) {
-      console.warn('Save point failed:', err);
-    } finally {
-      busy = false;
-    }
-  }, intervalMs);
-  return () => clearInterval(timer);
+    })().finally(() => { busy = null; });
+    return busy;
+  };
+  const onHidden = () => {
+    if (lifecycle.document?.visibilityState === 'hidden') flush(true);
+  };
+  const onPageHide = () => { flush(true); };
+  lifecycle.document?.addEventListener('visibilitychange', onHidden);
+  lifecycle.addEventListener?.('pagehide', onPageHide);
+  const timer = setInterval(() => flush(), intervalMs);
+  return () => {
+    active = false;
+    clearInterval(timer);
+    lifecycle.document?.removeEventListener('visibilitychange', onHidden);
+    lifecycle.removeEventListener?.('pagehide', onPageHide);
+    return busy ?? Promise.resolve();
+  };
 }
 
 export async function recordCrash(report) {
