@@ -1011,7 +1011,7 @@ index 644fe1e06b..2f230eedb9 100644
 
  } // namespace Shader::Backend::WGSL
 diff --git a/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp b/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
-index 9bcb6836e9..05f16be07a 100644
+index 9bcb6836e9..63ecf59f41 100644
 --- a/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
 +++ b/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
 @@ -105,6 +105,85 @@ void ConvertRectangleIndices(Maxwell::PrimitiveTopology topology, std::span<cons
@@ -1118,13 +1118,16 @@ index 9bcb6836e9..05f16be07a 100644
          index.buffer = buffer;
          index.offset = offset;
          index.size = Common::AlignUp(size, 4);
-@@ -275,7 +355,12 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
+@@ -275,7 +355,15 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
              break;
          }
      }
 -    if (rectangle_draw) {
 +    if (tessellation_draw) {
 +        index_scratch = indices;
++        if (rectangle_restart) {
++            std::erase(index_scratch, rectangle_restart_index);
++        }
 +    } else if (geometry_draw) {
 +        ConvertGeometryIndices(topology, indices, index_scratch, rectangle_restart,
 +                               rectangle_restart_index);
@@ -1132,7 +1135,7 @@ index 9bcb6836e9..05f16be07a 100644
          ConvertRectangleIndices(topology, indices, index_scratch, rectangle_restart,
                                  rectangle_restart_index);
      } else {
-@@ -286,14 +371,14 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
+@@ -286,14 +374,14 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
          index_scratch.push_back(0);
      }
      const auto bytes = std::as_bytes(std::span(index_scratch));
@@ -1149,7 +1152,7 @@ index 9bcb6836e9..05f16be07a 100644
  }
 
  void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 first, u32 count) {
-@@ -301,7 +386,9 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
+@@ -301,7 +389,9 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
      for (u32 i = 0; i < count; ++i) {
          vertices[i] = first + i;
      }
@@ -1160,7 +1163,7 @@ index 9bcb6836e9..05f16be07a 100644
          ConvertRectangleIndices(topology, vertices, index_scratch, false, 0);
      } else {
          ConvertIndices(topology, vertices, index_scratch);
-@@ -311,14 +398,15 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
+@@ -311,14 +401,15 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
          index_scratch.push_back(first);
      }
      const auto bytes = std::as_bytes(std::span(index_scratch));
