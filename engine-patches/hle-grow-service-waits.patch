@@ -1,0 +1,74 @@
+diff --git a/src/core/hle/kernel/k_synchronization_object.cpp b/src/core/hle/kernel/k_synchronization_object.cpp
+index 221cab655f..27329229c1 100644
+--- a/src/core/hle/kernel/k_synchronization_object.cpp
++++ b/src/core/hle/kernel/k_synchronization_object.cpp
+@@ -4,9 +4,10 @@
+ // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <boost/container/small_vector.hpp>
++
+ #include "common/assert.h"
+ #include "common/common_types.h"
+-#include "common/scratch_buffer.h"
+ #include "core/hle/kernel/k_scheduler.h"
+ #include "core/hle/kernel/k_scoped_scheduler_lock_and_sleep.h"
+ #include "core/hle/kernel/k_synchronization_object.h"
+@@ -76,8 +77,9 @@ void KSynchronizationObject::Finalize(KernelCore& kernel) {
+ Result KSynchronizationObject::Wait(KernelCore& kernel, s32* out_index,
+                                     KSynchronizationObject** objects, const s32 num_objects,
+                                     s64 timeout) {
+-    // Allocate space on stack for thread nodes.
+-    std::array<ThreadListNode, Svc::ArgumentHandleCountMax> thread_nodes;
++    // Keep guest-sized waits inline without capping host service waits.
++    boost::container::small_vector<ThreadListNode, Svc::ArgumentHandleCountMax> thread_nodes(
++        static_cast<size_t>(num_objects));
+ 
+     // Prepare for wait.
+     KThread* thread = GetCurrentThreadPointer(kernel);
+diff --git a/src/core/hle/service/os/multi_wait.cpp b/src/core/hle/service/os/multi_wait.cpp
+index c9bb256ab0..cf3cf6406a 100644
+--- a/src/core/hle/service/os/multi_wait.cpp
++++ b/src/core/hle/service/os/multi_wait.cpp
+@@ -4,6 +4,8 @@
+ // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <boost/container/small_vector.hpp>
++
+ #include "core/hle/kernel/k_hardware_timer.h"
+ #include "core/hle/kernel/k_synchronization_object.h"
+ #include "core/hle/kernel/kernel.h"
+@@ -28,21 +30,20 @@ MultiWaitHolder* MultiWait::TimedWaitAny(Kernel::KernelCore& kernel, s64 timeout
+ }
+ 
+ MultiWaitHolder* MultiWait::TimedWaitImpl(Kernel::KernelCore& kernel, s64 timeout_tick) {
+-    std::array<MultiWaitHolder*, Kernel::Svc::ArgumentHandleCountMax> holders{};
+-    std::array<Kernel::KSynchronizationObject*, Kernel::Svc::ArgumentHandleCountMax> objects{};
+-
+-    s32 out_index = -1;
+-    s32 num_objects = 0;
+-
+-    for (auto it = m_wait_list.begin(); it != m_wait_list.end(); it++) {
+-        ASSERT(num_objects < Kernel::Svc::ArgumentHandleCountMax);
+-        holders[num_objects] = std::addressof(*it);
+-        objects[num_objects] = it->GetNativeHandle();
+-        num_objects++;
++    // HLE servers can track more sessions than a guest wait may pass to the kernel.
++    boost::container::small_vector<MultiWaitHolder*, Kernel::Svc::ArgumentHandleCountMax> holders;
++    boost::container::small_vector<Kernel::KSynchronizationObject*,
++                                   Kernel::Svc::ArgumentHandleCountMax>
++        objects;
++
++    for (auto& holder : m_wait_list) {
++        holders.push_back(std::addressof(holder));
++        objects.push_back(holder.GetNativeHandle());
+     }
+ 
++    s32 out_index = -1;
+     Kernel::KSynchronizationObject::Wait(kernel, std::addressof(out_index), objects.data(),
+-                                         num_objects, timeout_tick);
++                                         static_cast<s32>(objects.size()), timeout_tick);
+ 
+     if (out_index == -1) {
+         return nullptr;
