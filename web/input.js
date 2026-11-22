@@ -4,6 +4,7 @@
 // each when multiplayer is on. Rumble the game asks for is played on the matching gamepad.
 
 import { ACTIONS, bindingKey, isKeyboardField, readBindings, usesNativeKeys } from './bindings.js';
+import { setupTouchscreen } from './touchscreen.js';
 
 /// VirtualGamepad::VirtualButton ids in the engine.
 export const Button = {
@@ -49,6 +50,7 @@ const STICK_SELECTORS = ['.stick-left', '.stick-right'];
 /// `getModule` returns the Emscripten module once a game is running, else null. Returns the
 /// gamepad controls the page's Gamepads panel uses.
 export function setupInput(getModule) {
+  setupTouchscreen(document.querySelector('#canvas'), getModule);
   // Each source holds its own pressed buttons and stick vectors and the player it drives; each
   // player sees the union of its sources.
   const sources = new Map();

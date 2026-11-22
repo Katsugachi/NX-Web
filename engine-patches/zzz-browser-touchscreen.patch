@@ -1,0 +1,79 @@
+--- a/src/yuzu_cmd/emscripten_main.cpp
++++ b/src/yuzu_cmd/emscripten_main.cpp
+@@ -58,6 +58,7 @@
+ #include "hid_core/frontend/emulated_controller.h"
+ #include "hid_core/hid_core.h"
+ #include "input_common/drivers/camera.h"
++#include "input_common/drivers/touch_screen.h"
+ #include "input_common/drivers/virtual_gamepad.h"
+ #include "input_common/main.h"
+ #include "video_core/gpu.h"
+@@ -97,7 +98,7 @@
+ };
+ 
+ struct Request {
+-    enum class Kind { Boot, Pause, Resume, Shutdown, Button, Stick, Connect } kind;
++    enum class Kind { Boot, Pause, Resume, Shutdown, Button, Stick, Connect, Touch } kind;
+     std::string path;
+     /// Input: player index, VirtualGamepad button or stick id, and its state (pressed is also
+     /// whether a Connect request connects or disconnects the player).
+@@ -181,6 +182,7 @@
+     // Browser controllers use the virtual gamepad, without a Cemuhook UDP transport.
+     Settings::values.udp_input_servers.SetValue("");
+     Settings::values.enable_ir_sensor.SetValue(true);
++    Settings::values.touchscreen.enabled = true;
+ #ifdef EDEN_WEB_HEADLESS
+     Settings::values.sink_id.SetValue(Settings::AudioEngine::Null);
+ #else
+@@ -521,6 +523,16 @@
+ /// Moves a stick (0 left, 1 right) to x, y in [-1, 1], with +y up.
+ EMSCRIPTEN_KEEPALIVE void eden_set_stick(int player, int stick, float x, float y) {
+     PushRequest({.kind = Request::Kind::Stick, .player = player, .id = stick, .x = x, .y = y});
++}
++
++/// A contact in Switch touchscreen pixels (1280x720); releasing only needs its id (0..15).
++EMSCRIPTEN_KEEPALIVE void eden_set_touch(int id, float x, float y, int pressed) {
++    if (id < 0 || id >= 16 || !std::isfinite(x) || !std::isfinite(y)) {
++        return;
++    }
++    PushRequest({.kind = Request::Kind::Touch, .id = id, .pressed = pressed != 0,
++                 .x = std::clamp(x / 1280.0f, 0.0f, 1.0f),
++                 .y = std::clamp(y / 720.0f, 0.0f, 1.0f)});
+ }
+ 
+ /// Connects (1) or disconnects (0) a Pro Controller for player 2 to 8 (index 1 to 7).
+@@ -935,15 +947,18 @@
+         if (request) {
+             switch (request->kind) {
+             case Request::Kind::Boot:
++                emulator->input_subsystem.GetTouchScreen()->ReleaseAllTouch();
+                 emulator->Boot(request->path);
+                 break;
+             case Request::Kind::Pause:
++                emulator->input_subsystem.GetTouchScreen()->ReleaseAllTouch();
+                 emulator->Pause();
+                 break;
+             case Request::Kind::Resume:
+                 emulator->Resume();
+                 break;
+             case Request::Kind::Shutdown:
++                emulator->input_subsystem.GetTouchScreen()->ReleaseAllTouch();
+                 emulator->Shutdown();
+                 break;
+             case Request::Kind::Button:
+@@ -954,6 +969,15 @@
+                 break;
+             case Request::Kind::Connect:
+                 emulator->SetPlayerConnected(request->player, request->pressed);
++                break;
++            case Request::Kind::Touch:
++                if (request->pressed) {
++                    emulator->input_subsystem.GetTouchScreen()->TouchMoved(
++                        request->x, request->y, static_cast<size_t>(request->id));
++                } else {
++                    emulator->input_subsystem.GetTouchScreen()->TouchReleased(
++                        static_cast<size_t>(request->id));
++                }
+                 break;
+             }
+         }
