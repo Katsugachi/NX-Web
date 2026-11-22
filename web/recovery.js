@@ -12,7 +12,7 @@
 import { EDEN_DATA_ROOT, readZipEntries, writeZip } from './system-files.js';
 
 // nand/system/save holds the user profile; user saves are filed under its id, so both are needed.
-const SAVE_DIRS = ['nand/user/save', 'nand/system/save'];
+const SAVE_DIRS = ['nand/user/save', 'nand/system/save', 'sdmc'];
 const DB_NAME = 'eden-recovery';
 const SAVES = 'saves';
 const CRASHES = 'crashes';
@@ -153,6 +153,7 @@ export function savePathFor(name, profile) {
   const base = parts.at(-1) ?? '';
   if (parts[0] === '__MACOSX' || base === '.DS_Store' || base.startsWith('._')) return null;
   const lower = parts.map(part => part.toLowerCase());
+  if (lower[0] === 'sdmc' && parts.length > 1) return ['sdmc', ...parts.slice(1)].join('/');
   for (let i = 0; i + 3 < parts.length; i++) {
     if (lower[i] === 'nand' && (lower[i + 1] === 'user' || lower[i + 1] === 'system') && lower[i + 2] === 'save') {
       return [`nand/${lower[i + 1]}/save`, ...parts.slice(i + 3)].join('/');

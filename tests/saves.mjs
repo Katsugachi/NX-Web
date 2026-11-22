@@ -7,13 +7,14 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { readZipEntries, writeZip } from '../web/system-files.js';
-import { savePathFor, restoreSaves, watchSaves, savePointInfo } from '../web/recovery.js';
+import { savePathFor, restoreSaves, watchSaves, savePointInfo, exportSaves, importSaves } from '../web/recovery.js';
 import { EDEN_DATA_ROOT } from '../web/system-files.js';
 
 const files = [
   { name: 'nand/user/save/0000000000000000/0123456789ABCDEF0123456789ABCDEF/010013C00E930000/user1.dat', data: new Uint8Array([1, 2, 3]) },
   { name: 'nand/system/save/8000000000000010/su/avators/profiles.dat', data: new Uint8Array(70_000).map((_, i) => i * 7) },
   { name: 'nand/user/save/empty.bin', data: new Uint8Array() },
+  { name: 'sdmc/nxweb-save-test.txt', data: new Uint8Array([49]) },
 ];
 const zip = writeZip(files);
 const file = new File([zip], 'saves.zip');
@@ -45,6 +46,9 @@ assert.equal(savePathFor('0100f2c0115b6000/slot/0.sav', profile),
 assert.equal(savePathFor('__MACOSX/0100F2C0115B6000/._0.sav', profile), null);
 assert.equal(savePathFor('0100F2C0115B6000/.DS_Store', profile), null);
 assert.equal(savePathFor('readme.txt', profile), null);
+assert.equal(savePathFor('sdmc/nxweb-save-test.txt', null), 'sdmc/nxweb-save-test.txt');
+assert.equal(savePathFor('sdmc', null), null);
+assert.throws(() => savePathFor('sdmc/../keys/prod.keys', null), /unsafe/);
 assert.throws(() => savePathFor('0100F2C0115B6000/../../keys/prod.keys', profile), /unsafe/);
 assert.throws(() => savePathFor('0100F2C0115B6000/0.sav', undefined), /No user profile/);
 
@@ -102,18 +106,21 @@ console.warn = (...args) => warnings.push(args);
 try {
   let saved;
   const contents = new Map();
+  const sdContents = new Map();
+  const contentFor = path => (path.includes('/sdmc/') ? sdContents : contents).get(path.split('/').at(-1));
   let unreadable = null;
   const FS = {
     readdir(dir) {
       if (dir === `${EDEN_DATA_ROOT}/nand/user/save`) return [...contents.keys()];
+      if (dir === `${EDEN_DATA_ROOT}/sdmc`) return [...sdContents.keys()];
       throw new Error('No directory');
     },
-    stat(path) { return { size: contents.get(path.split('/').at(-1)).length, mtime: 1, mode: 0 }; },
+    stat(path) { return { size: contentFor(path).length, mtime: 1, mode: 0 }; },
     isDir: () => false,
     readFile(path) {
       const name = path.split('/').at(-1);
       if (name === unreadable) throw new Error('Save read failed');
-      return contents.get(name);
+      return contentFor(path);
     },
   };
   const stop = watchSaves(() => FS, () => true, meta => { saved = meta; });
@@ -151,6 +158,20 @@ try {
   await poll();
   assert.equal(saved.files, 0);
   assert.equal(await restoreSaves({}), 0);
+  sdContents.set('nxweb-save-test.txt', new Uint8Array([49]));
+  await poll();
+  await poll();
+  assert.equal(saved.files, 1);
+  assert.deepEqual(new Uint8Array(await snapshot.get('sdmc/nxweb-save-test.txt').arrayBuffer()), new Uint8Array([49]));
+  const backup = await exportSaves();
+  snapshot.clear();
+  await importSaves(new File([backup], 'sdmc.zip'));
+  const sdRestored = new Map();
+  await restoreSaves({ mkdirTree() {}, writeFile: (path, data) => sdRestored.set(path, data) });
+  assert.deepEqual(sdRestored.get(`${EDEN_DATA_ROOT}/sdmc/nxweb-save-test.txt`), new Uint8Array([49]));
+  sdContents.clear();
+  await poll();
+  await poll();
   stop();
 } finally {
   globalThis.indexedDB = originalIndexedDB;
