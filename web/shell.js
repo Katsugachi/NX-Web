@@ -200,7 +200,7 @@ $('show-joycons').closest('label').hidden = true;
 document.querySelectorAll('.joycon').forEach(node => node.remove());
 const backToLibrary = () => { location.href = location.pathname; };
 $('back-library').addEventListener('click', () => {
-  if (['Booting','Running','Paused'].includes($('wasm-state').textContent)) leave.showModal(); else backToLibrary();
+  if (['Booting','Running','Paused'].includes($('wasm-state').textContent)) { releaseInput(); leave.showModal(); } else backToLibrary();
 });
 $('keep-playing').addEventListener('click', () => leave.close());
 $('leave-game').addEventListener('click', backToLibrary);
