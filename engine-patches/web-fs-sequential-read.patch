@@ -1,0 +1,113 @@
+--- a/src/core/file_sys/vfs/vfs_real.cpp
++++ b/src/core/file_sys/vfs/vfs_real.cpp
+@@ -221,6 +221,9 @@
+     if (!reference.file) {
+         this->EvictSingleReferenceLocked();
+ 
++#ifdef __EMSCRIPTEN__
++        reference.reader.Reset();
++#endif
+         reference.file =
+             FS::FileOpen(path, ModeFlagsToFileAccessMode(perms), FS::FileType::BinaryFile);
+         if (reference.file) {
+@@ -316,6 +319,9 @@
+ bool RealVfsFile::Resize(std::size_t new_size) {
+     size.reset();
+     auto lk = base.RefreshReference(path, perms, *reference);
++#ifdef __EMSCRIPTEN__
++    reference->reader.Reset();
++#endif
+     return reference->file ? reference->file->SetSize(new_size) : false;
+ }
+ 
+@@ -333,15 +339,23 @@
+ 
+ std::size_t RealVfsFile::Read(u8* data, std::size_t length, std::size_t offset) const {
+     auto lk = base.RefreshReference(path, perms, *reference);
++#ifdef __EMSCRIPTEN__
++    return reference->file ? reference->reader.Read(*reference->file, std::span{data, length}, offset)
++                           : 0;
++#else
+     if (!reference->file || !reference->file->Seek(static_cast<s64>(offset))) {
+         return 0;
+     }
+     return reference->file->ReadSpan(std::span{data, length});
++#endif
+ }
+ 
+ std::size_t RealVfsFile::Write(const u8* data, std::size_t length, std::size_t offset) {
+     size.reset();
+     auto lk = base.RefreshReference(path, perms, *reference);
++#ifdef __EMSCRIPTEN__
++    reference->reader.Reset();
++#endif
+     if (!reference->file || !reference->file->Seek(static_cast<s64>(offset))) {
+         return 0;
+     }
+--- a/src/core/file_sys/vfs/vfs_real.h
++++ b/src/core/file_sys/vfs/vfs_real.h
+@@ -11,6 +11,9 @@
+ #include <optional>
+ #include <string_view>
+ #include "common/intrusive_list.h"
++#ifdef __EMSCRIPTEN__
++#include "common/fs/sequential_read.h"
++#endif
+ #include "core/file_sys/fs_filesystem.h"
+ #include "core/file_sys/vfs/vfs.h"
+ 
+@@ -22,6 +25,9 @@
+ 
+ struct FileReference : public Common::IntrusiveListBaseNode<FileReference> {
+     std::shared_ptr<Common::FS::IOFile> file{};
++#ifdef __EMSCRIPTEN__
++    Common::FS::SequentialRead reader;
++#endif
+ };
+ 
+ class RealVfsFile;
+--- /dev/null
++++ b/src/common/fs/sequential_read.h
+@@ -0,0 +1,42 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++#include <optional>
++#include <span>
++
++namespace Common::FS {
++
++class SequentialRead {
++public:
++    void Reset() {
++        position.reset();
++    }
++
++    template <typename File>
++    std::size_t Read(File& file, std::span<std::uint8_t> data, std::size_t offset) {
++        if (offset > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) {
++            Reset();
++            return 0;
++        }
++        if (position != offset && !file.Seek(static_cast<std::int64_t>(offset))) {
++            Reset();
++            return 0;
++        }
++        const auto count = file.ReadSpan(data);
++        if (count == data.size() && count <= std::numeric_limits<std::size_t>::max() - offset) {
++            position = offset + count;
++        } else {
++            Reset();
++        }
++        return count;
++    }
++
++private:
++    std::optional<std::size_t> position;
++};
++
++} // namespace Common::FS
