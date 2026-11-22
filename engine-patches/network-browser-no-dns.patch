@@ -1,0 +1,53 @@
+diff --git a/src/core/internal_network/network.cpp b/src/core/internal_network/network.cpp
+index 01d37fb35b..20baa576f6 100644
+--- a/src/core/internal_network/network.cpp
++++ b/src/core/internal_network/network.cpp
+@@ -323,7 +323,7 @@ Errno GetAndLogLastError(CallType call_type = CallType::Other) {
+     return err;
+ }
+ 
+-GetAddrInfoError TranslateGetAddrInfoErrorFromNative(int gai_err) {
++[[maybe_unused]] GetAddrInfoError TranslateGetAddrInfoErrorFromNative(int gai_err) {
+     switch (gai_err) {
+     case 0: return GetAddrInfoError::SUCCESS;
+     case EAI_AGAIN: return GetAddrInfoError::AGAIN;
+@@ -385,7 +385,7 @@ int TranslateDomainToNative(Domain domain) {
+     }
+ }
+ 
+-Type TranslateTypeFromNative(int type) {
++[[maybe_unused]] Type TranslateTypeFromNative(int type) {
+     switch (type) {
+     case 0:
+         return Type::Unspecified;
+@@ -598,7 +598,7 @@ int TranslateTypeToNative(Type type) {
+     NETWORK_PROTOCOL_TRANSLATE_ELEM(UDP) \
+     NETWORK_PROTOCOL_TRANSLATE_ELEM(SCTP)
+ #endif
+-[[nodiscard]] Protocol TranslateProtocolFromNative(u32 protocol) {
++[[maybe_unused, nodiscard]] Protocol TranslateProtocolFromNative(u32 protocol) {
+     switch (protocol) {
+ #define NETWORK_PROTOCOL_TRANSLATE_ELEM(x) case IPPROTO_##x: return Protocol::x;
+     NETWORK_PROTOCOL_TRANSLATE_LIST
+@@ -735,6 +735,13 @@ u32 IPv4AddressToInteger(IPv4Address ip_addr) {
+ 
+ std::variant<std::vector<AddrInfo>, GetAddrInfoError> GetAddressInfo(
+     const std::string& host, const std::optional<std::string>& service) {
++#ifdef __EMSCRIPTEN__
++    // Browser builds have no host-network backend. Report DNS unavailable instead of entering
++    // Emscripten's host resolver, whose addrinfo linked-list pointers are not Memory64-safe.
++    (void)host;
++    (void)service;
++    return GetAddrInfoError::NONAME;
++#else
+     addrinfo hints{};
+     hints.ai_family = AF_INET; // Switch only supports IPv4.
+     addrinfo* addrinfo;
+@@ -761,6 +768,7 @@ std::variant<std::vector<AddrInfo>, GetAddrInfoError> GetAddressInfo(
+     }
+     freeaddrinfo(addrinfo);
+     return ret;
++#endif
+ }
+ 
+ std::pair<s32, Errno> Poll(std::vector<PollFD>& pollfds, s32 timeout) {
