@@ -350,19 +350,9 @@ index b6e5220f2c..d89bcb9f65 100644
  
  private:
 diff --git a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
-index 8598236281..ba40404856 100644
 --- a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
 +++ b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
-@@ -210,7 +210,7 @@ u8 ProvidedComponents(const Vulkan::FixedPipelineState& state, size_t index) {
-     if (format == MaxwellToWGPU::INVALID_VERTEX_FORMAT) {
-         return 0;
-     }
--    const u32 stride = state.vertex_strides[attribute.buffer] & ~3u;
-+    const u32 stride = state.vertex_strides[attribute.buffer];
-     if (stride != 0 && attribute.offset + MaxwellToWGPU::VertexFormatSize(format) > stride) {
-         return 0;
-     }
-@@ -378,15 +378,32 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
+@@ -378,15 +378,32 @@
          return nullptr;
      }
      graphics_key.state.Refresh(*maxwell3d, dynamic_features);
@@ -373,6 +363,8 @@ index 8598236281..ba40404856 100644
 -        GraphicsEnvironments environments;
 -        GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
 -        it->second = std::make_unique<GraphicsPipeline>(*this, graphics_key, std::move(environments));
+-    }
+-    current_pipeline = it->second.get();
 +    graphics_key.fill_rectangle = MaxwellToWGPU::IsRectangleDraw(
 +        maxwell3d->regs, maxwell3d->draw_manager.draw_state.topology);
 +    const auto lookup = [&]() {
@@ -398,12 +390,11 @@ index 8598236281..ba40404856 100644
 +        }
 +        graphics_key.fill_rectangle = 0;
 +        current_pipeline = lookup();
-     }
--    current_pipeline = it->second.get();
++    }
      return current_pipeline->IsValid() ? current_pipeline : nullptr;
  }
  
-@@ -515,7 +532,33 @@ GraphicsPipeline::GraphicsPipeline(PipelineCache& cache_, const GraphicsPipeline
+@@ -515,7 +532,33 @@
  }
  
  u32 GraphicsPipeline::CbufLimit(size_t stage) const {
@@ -438,26 +429,7 @@ index 8598236281..ba40404856 100644
  }
  
  bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant, bool infos_only) {
-@@ -574,7 +617,8 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
-         }
- 
-         // Guest vertex buffers the pipeline reads take WebGPU's vertex buffer slots in order; the
--        // shader fetches the ones past the last slot from storage buffers.
-+        // shader fetches the ones past the last slot, and those with strides WebGPU cannot
-+        // describe (not a multiple of 4), from storage buffers.
-         std::array<bool, Maxwell::NumVertexArrays> buffer_read{};
-         for (size_t index = 0; index < Maxwell::NumVertexAttributes; ++index) {
-             const auto& attribute = key.state.attributes[index];
-@@ -586,10 +630,25 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
-         pulled_buffers.clear();
-         u32 num_read{};
-         for (u32 buffer = 0; buffer < Maxwell::NumVertexArrays; ++buffer) {
--            if (buffer_read[buffer] && num_read++ >= cache.max_vertex_buffers) {
-+            if (!buffer_read[buffer]) {
-+                continue;
-+            }
-+            if (key.state.vertex_strides[buffer] % 4 != 0 ||
-+                num_read++ >= cache.max_vertex_buffers) {
+@@ -595,6 +638,17 @@
                  pulled_buffers.push_back(buffer);
              }
          }
@@ -475,7 +447,7 @@ index 8598236281..ba40404856 100644
          if (pulled_buffers.size() > Shader::Backend::WGSL::MAX_PULLED_BUFFERS) {
              LOG_WARNING(Render, "WebGPU: pipeline {:016x} reads too many vertex buffers", key.Hash());
              return false;
-@@ -627,6 +686,7 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+@@ -632,6 +686,7 @@
                  options.output_interpolation = programs[5].info.interpolation;
              }
              if (program.stage == Shader::Stage::VertexB) {
@@ -483,7 +455,7 @@ index 8598236281..ba40404856 100644
                  for (size_t attr = 0; attr < Maxwell::NumVertexAttributes; ++attr) {
                      options.attribute_components[attr] = ProvidedComponents(key.state, attr);
                      const auto& attribute = key.state.attributes[attr];
-@@ -757,18 +817,25 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+@@ -762,18 +817,25 @@
          draw_layout_desc.entryCount = 1;
          draw_layout_desc.entries = &draw_entry;
          const wgpu::BindGroupLayout draw_layout = device.CreateBindGroupLayout(&draw_layout_desc);
@@ -512,7 +484,7 @@ index 8598236281..ba40404856 100644
              wgpu::BindGroupLayoutDescriptor pulled_desc{};
              pulled_desc.entryCount = pulled_entries.size();
              pulled_desc.entries = pulled_entries.data();
-@@ -836,7 +903,8 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+@@ -841,7 +903,8 @@
          desc.vertex.buffers = buffer_layouts.data();
  
          const auto& dynamic = state.dynamic_state;
