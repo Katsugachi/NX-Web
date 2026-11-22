@@ -1152,6 +1152,7 @@ const RESUME_KEY = 'eden-resume';
 const RESTARTS_KEY = 'eden-restarts';
 const RESUME_DIR = 'crash-resume';
 let lastGameFile = null;
+let resumedGameFile = null;
 let bootedAt = 0;
 let stopSaveWatch = null;
 const autoRestart = document.getElementById('auto-restart');
@@ -1272,6 +1273,7 @@ async function resumeDir() {
 }
 
 async function stashGameFile(file, replace = false) {
+  if (file === resumedGameFile) return;
   const dir = await resumeDir();
   // A file already stashed by an earlier restart is the same game; keep it.
   const existing = await dir.getFileHandle(file.name).then(handle => handle.getFile()).catch(() => null);
@@ -1288,6 +1290,7 @@ async function resumeAfterCrash() {
   }
   try {
     const file = await (await (await resumeDir()).getFileHandle(resume.name)).getFile();
+    resumedGameFile = file;
     if (resume.reset) {
       log(`Resetting ${resume.name}.`, 'ui');
     } else if (resume.slot) {
