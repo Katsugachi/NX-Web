@@ -26,7 +26,7 @@ shell.innerHTML = `
   <section id="library" aria-labelledby="library-title">
     <button class="icon-button library-settings" id="library-settings" title="Settings (Tab)" aria-label="Settings">${icon('settings')}</button>
     <div class="library-content">
-      <h1 id="library-title">NX-Web</h1><p class="tagline">Your games. A new window.</p>
+      <h1 id="library-title">NX-Web</h1>
       <div id="library-drop"></div><div id="compatibility-problems" role="status" hidden></div><div id="launch-status" role="status"><p id="runtime-problem" hidden></p></div>
       <section id="recent-section" aria-label="Recently opened" hidden><div class="recent-heading"><span>Recently opened</span><button class="text-button" id="clear-recent">Clear</button></div><div id="recent-games"></div></section>
     </div>
@@ -45,7 +45,7 @@ shell.innerHTML = `
     <div role="tablist" aria-label="Settings sections" id="settings-tabs"></div><div id="settings-panels"></div>
   </dialog>
   <dialog id="leave-dialog" aria-labelledby="leave-title" aria-describedby="leave-text"><h2 id="leave-title">Stop this game?</h2><p id="leave-text">You'll go back to the library. In-game saves already written to storage are kept; progress since then is lost.</p><div class="dialog-actions"><button id="keep-playing" autofocus>Keep playing</button><button id="leave-game" class="primary">Stop and go back</button></div></dialog>
-  <dialog id="shortcuts-dialog" aria-labelledby="shortcuts-title"><div class="drawer-heading"><div><h2 id="shortcuts-title">Stay in control.</h2><p>Your keyboard is the controller.</p></div><button id="close-shortcuts" class="icon-button" aria-label="Close shortcuts">${icon('close')}</button></div><div id="shortcuts-columns"></div><p class="shortcut-footnote">Change mappings in Settings → Controls. Alt shortcuts are fixed. Gamepads connect automatically.</p></dialog>`;
+  <dialog id="shortcuts-dialog" aria-labelledby="shortcuts-title"><div class="drawer-heading"><h2 id="shortcuts-title">Keyboard shortcuts</h2><button id="close-shortcuts" class="icon-button" aria-label="Close shortcuts">${icon('close')}</button></div><div id="shortcuts-columns"></div><p class="shortcut-footnote">Change mappings in Settings → Controls. Alt shortcuts are fixed.</p></dialog>`;
 document.body.append(shell);
 
 const drawer = $('settings-drawer');
