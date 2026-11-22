@@ -13,6 +13,7 @@ import { mountBrowserRom } from './browser-rom.js';
 import { setupAudio } from './audio.js';
 import { setupCamera } from './camera.js';
 import { createFrameWatchdog } from './frame-watchdog.js';
+import { playerFps, rebootGame, createPipCapture } from './player-session.js';
 import { isArchive, openArchive, storedRomSlice } from './archive.js';
 import { BUILD_CORES, activeCore, coreBackend, coreEnvironment, findCore, runtimeBase, storeCore } from './cores.js';
 import {
@@ -102,6 +103,7 @@ let currentRomData = null;
 let gpuFailure = '';
 let memoryUnavailable = false;
 let loadingRom = false;
+let resetting = false;
 let crashed = false;
 let browserRom = null;
 
@@ -602,9 +604,9 @@ function pollStatus() {
   fullscreenPause.disabled = !(isRunning || isPaused);
   btnPlay.disabled = !isPaused;
   btnPause.disabled = !isRunning;
-  btnReset.disabled = !(isRunning || isPaused);
+  btnReset.disabled = resetting || !(isRunning || isPaused);
   btnStep.disabled = true;
-  if (isRunning) attachPipStream();
+  btnPip.disabled = btnPipStage.disabled = !canPip || !(isRunning || isPaused);
   if (state !== lastState) {
     lastState = state;
     if (state === 1) peakFps = 0;
@@ -628,13 +630,13 @@ function pollStatus() {
   if (state === 2 && gameFps > 0) loader.finish();
   watchFrames(state, gameFps, runtimeStats?.frames);
   const speed = finite(edenModule._eden_get_emulation_speed()) * 100;
-  fpsCounter.textContent = `${gameFps.toFixed(1)} FPS`;
-  systemFps.textContent = `${finite(edenModule._eden_get_system_fps()).toFixed(1)} FPS`;
-  frametimeCounter.textContent = `${finite(edenModule._eden_get_frametime()).toFixed(2)} ms`;
+  fpsCounter.textContent = playerFps(state, gameFps);
+  systemFps.textContent = isRunning ? playerFps(state, edenModule._eden_get_system_fps()) : '--';
+  frametimeCounter.textContent = isRunning ? `${finite(edenModule._eden_get_frametime()).toFixed(2)} ms` : '--';
   const limit = edenModule._eden_get_speed_limit?.() ?? 100;
   const uncapped = limit === 0;
   if (edenModule._eden_get_speed_limit) showSpeedLimit(limit);
-  emuSpeed.textContent = `${speed.toFixed(0)}%${uncapped ? ' · uncapped' : ''}`;
+  emuSpeed.textContent = isRunning ? `${speed.toFixed(0)}%${uncapped ? ' · uncapped' : ''}` : '--';
   fpsCaption.textContent = isRunning ? `${gameFps.toFixed(1)} FPS · ${uncapped ? 'uncapped' : `${speed.toFixed(0)}%`}` : '';
   if (isRunning) peakFps = Math.max(peakFps, gameFps);
   speedFps.textContent = isRunning ? `${gameFps.toFixed(1)} FPS` : '--';
@@ -651,10 +653,28 @@ function pauseLoop() {
   edenModule?._eden_pause();
 }
 
-function resetEmulation() {
-  // The core does not support rebooting in place; reload the page to start over.
-  if (!crashed) edenModule?._eden_shutdown();
-  location.reload();
+async function resetEmulation() {
+  if (resetting) return;
+  resetting = true;
+  btnReset.disabled = true;
+  btnReset.textContent = 'Resetting…';
+  try {
+    await rebootGame(lastGameFile, {
+      stash: file => stashGameFile(file, true),
+      mark: file => sessionStorage.setItem(RESUME_KEY, JSON.stringify({ name: file.name, reset: true })),
+      shutdown: () => { if (!crashed) edenModule?._eden_shutdown(); },
+      reload: () => location.reload(),
+    });
+  } catch (err) {
+    try { sessionStorage.removeItem(RESUME_KEY); } catch {}
+    log(`Could not reset the game: ${err.message}`, 'err');
+    setRomStatus(`Could not reset the game: ${err.message}. The current game has not been reloaded.`);
+    btnReset.textContent = 'Reset failed — retry';
+    btnReset.title = err.message;
+  } finally {
+    resetting = false;
+    btnReset.disabled = !(isRunning || isPaused);
+  }
 }
 
 const ROM_EXTENSIONS = ['.nsp', '.xci', '.nro', '.nca', '.nso'];
@@ -926,40 +946,37 @@ const pipOverlay = document.getElementById('pip-overlay');
 const pipHelp = document.getElementById('pip-help');
 const canPip = !!(document.pictureInPictureEnabled && canvas.captureStream && pipVideo.requestPictureInPicture);
 
-// The canvas stream only has frames once a game draws, so it is attached at boot
-// and PiP stays unavailable until the video has its first frame.
-function attachPipStream() {
-  if (!canPip || pipVideo.srcObject) return;
-  pipVideo.srcObject = canvas.captureStream(60);
-  pipVideo.play().catch(() => {});
-}
-pipVideo.addEventListener('loadedmetadata', () => {
-  btnPip.disabled = false;
-  btnPipStage.disabled = false;
-});
+const pipCapture = createPipCapture(canvas, pipVideo);
+let pipOpening = false;
 
 async function togglePictureInPicture() {
-  if (!canPip) return;
+  if (!canPip || pipOpening) return;
+  pipOpening = true;
   try {
     if (document.pictureInPictureElement) {
       await document.exitPictureInPicture();
       return;
     }
-    if (pipVideo.readyState < 1) return;
+    if (!(isRunning || isPaused)) return;
     if (fullscreenElement()) await (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    await pipCapture.start();
     await pipVideo.requestPictureInPicture();
   } catch (err) {
+    pipCapture.stop();
     log(`Picture-in-picture failed: ${err.message}`, 'err');
+  } finally {
+    pipOpening = false;
   }
 }
 
 function onPipChange(active) {
   pipOverlay.hidden = !active;
   btnPip.textContent = active ? '✕ Exit picture-in-picture' : '⧉ Picture-in-picture';
-  if (!active) pipVideo.play().catch(() => {});
+  if (!active) pipCapture.stop();
 }
 pipVideo.addEventListener('enterpictureinpicture', () => onPipChange(true));
 pipVideo.addEventListener('leavepictureinpicture', () => onPipChange(false));
+window.addEventListener('pagehide', () => pipCapture.stop());
 // The PiP window's play/pause buttons drive the emulator rather than the stream.
 pipVideo.addEventListener('pause', () => {
   if (document.pictureInPictureElement === pipVideo && isRunning) pauseLoop();
@@ -1244,11 +1261,11 @@ async function resumeDir() {
   return root.getDirectoryHandle(RESUME_DIR, { create: true });
 }
 
-async function stashGameFile(file) {
+async function stashGameFile(file, replace = false) {
   const dir = await resumeDir();
   // A file already stashed by an earlier restart is the same game; keep it.
   const existing = await dir.getFileHandle(file.name).then(handle => handle.getFile()).catch(() => null);
-  if (existing?.size === file.size) return;
+  if (!replace && existing?.size === file.size) return;
   const writable = await (await dir.getFileHandle(file.name, { create: true })).createWritable();
   await file.stream().pipeTo(writable);
 }
@@ -1261,7 +1278,9 @@ async function resumeAfterCrash() {
   }
   try {
     const file = await (await (await resumeDir()).getFileHandle(resume.name)).getFile();
-    if (resume.slot) {
+    if (resume.reset) {
+      log(`Resetting ${resume.name}.`, 'ui');
+    } else if (resume.slot) {
       savesStatus.textContent = `Restarted from slot ${resume.slot}.`;
       log(`Restarting ${resume.name} from save slot ${resume.slot}.`, 'ui');
     } else {
@@ -1270,7 +1289,7 @@ async function resumeAfterCrash() {
     }
     await handleFile(file);
   } catch (err) {
-    setRomStatus(`Could not restart ${resume.slot ? 'from the slot' : 'after the crash'} (${err.message}). Pick the game again.`);
+    setRomStatus(`Could not restart ${resume.reset ? 'after the reset' : resume.slot ? 'from the slot' : 'after the crash'} (${err.message}). Pick the game again.`);
   }
 }
 
