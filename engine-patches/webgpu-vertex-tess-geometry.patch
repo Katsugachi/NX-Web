@@ -1601,10 +1601,18 @@ index 78b0bf5ee4..404f7a3383 100644
      VideoCommon::ShaderCache::GraphicsEnvironments environments;
 
 diff --git a/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp b/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
-index 7d2f1366d4..cb3a58521a 100644
+index 7d2f1366d4..290bcb0fe4 100644
 --- a/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
 +++ b/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
-@@ -72,7 +72,8 @@ void RasterizerWebGPU::BindDrawInfoGroup() {
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+
++#include <atomic>
+ #include <limits>
+
+ #include "common/alignment.h"
+@@ -72,7 +73,8 @@ void RasterizerWebGPU::BindDrawInfoGroup() {
      auto& device = Thread::Get().device;
      wgpu::BindGroupLayoutEntry entry{};
      entry.binding = 0;
@@ -1614,7 +1622,7 @@ index 7d2f1366d4..cb3a58521a 100644
      entry.buffer.type = wgpu::BufferBindingType::Uniform;
      entry.buffer.hasDynamicOffset = true;
      entry.buffer.minBindingSize = sizeof(Shader::Backend::WGSL::DrawInfo);
-@@ -117,21 +118,26 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -117,21 +119,26 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
          return;
      }
      const bool rectangle = pipeline->IsRectangle();
@@ -1645,7 +1653,7 @@ index 7d2f1366d4..cb3a58521a 100644
      if (!pipeline->Configure(is_indexed)) {
          return;
      }
-@@ -149,15 +155,16 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -149,15 +156,16 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
      u32 first = is_indexed ? draw_state.index_buffer.first : draw_state.vertex_buffer.first;
      s32 base_vertex = is_indexed ? static_cast<s32>(draw_state.base_index) : 0;
      const bool needs_conversion =
@@ -1665,7 +1673,7 @@ index 7d2f1366d4..cb3a58521a 100644
              runtime.BindQuadIndexBuffer(draw_state.topology, draw_state.vertex_buffer.first, count);
          }
          indexed = true;
-@@ -167,8 +174,9 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -167,8 +175,9 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
          count = runtime.index.count;
          first = 0;
      }
@@ -1677,7 +1685,7 @@ index 7d2f1366d4..cb3a58521a 100644
          static bool logged = false;
          if (!logged) {
              LOG_WARNING(Render, "WebGPU: skipping fill-rectangle index conversion without CPU data");
-@@ -202,7 +210,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -202,7 +211,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
      info.render_area = {width, height, 0.0f, 0.0f};
      info.base_vertex = static_cast<u32>(base_vertex);
      info.base_instance = draw_state.base_instance;
@@ -1686,11 +1694,12 @@ index 7d2f1366d4..cb3a58521a 100644
          info.padding = first;
          if (indexed) {
              info.render_area[2] = runtime.index.format == wgpu::IndexFormat::Uint16 ? 2.0f : 4.0f;
-@@ -216,6 +224,46 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -216,6 +225,49 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
          std::swap(min_depth, max_depth);
          info.depth_flip = 1;
      }
 +    u32 tessellation_patch_count{};
++    bool tessellation_records_capped{};
 +    if (tessellation) {
 +        const u64 patches = static_cast<u64>(count / pipeline->PatchSize()) * instance_count;
 +        if (patches == 0) {
@@ -1704,10 +1713,12 @@ index 7d2f1366d4..cb3a58521a 100644
 +        const u64 per_patch = topology == wgpu::PrimitiveTopology::PointList  ? 4225
 +                              : topology == wgpu::PrimitiveTopology::LineList ? 49152
 +                                                                              : 24576;
-+        const u64 record_bytes = patches * per_patch * 16;
 +        const u64 max_bytes =
 +            std::min<u64>(limits.maxStorageBufferBindingSize, limits.maxBufferSize);
-+        if (patch_bytes > max_bytes || record_bytes > max_bytes ||
++        const u64 required_records = patches * per_patch * 16;
++        const u64 record_bytes = std::min(required_records, max_bytes / 16 * 16);
++        tessellation_records_capped = record_bytes < required_records;
++        if (patch_bytes > max_bytes ||
 +            patches > limits.maxComputeWorkgroupsPerDimension) {
 +            LOG_WARNING(Render, "WebGPU: tessellation draw exceeds device buffer/dispatch limits");
 +            return;
@@ -1733,7 +1744,7 @@ index 7d2f1366d4..cb3a58521a 100644
      const u32 draw_offset = uniform_ring.Push(
          std::span<const u8>(reinterpret_cast<const u8*>(&info), sizeof(info)));
 
-@@ -271,7 +319,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -271,7 +323,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
      // Vertex buffers past WebGPU's slots are read by the shader as storage buffers. Storage
      // bindings start at 256-byte aligned offsets; the shader adds the remainder.
      wgpu::BindGroup pulled_group;
@@ -1742,7 +1753,7 @@ index 7d2f1366d4..cb3a58521a 100644
          std::array<wgpu::BindGroupEntry, Shader::Backend::WGSL::MAX_PULLED_BUFFERS + 2> entries{};
          std::array<u32, Shader::Backend::WGSL::MAX_PULLED_BUFFERS> bases{};
          const size_t count = pipeline->pulled_buffers.size();
-@@ -298,7 +346,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -298,7 +350,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
          base_entry.offset = uniform_ring.Push(
              std::span<const u8>(reinterpret_cast<const u8*>(bases.data()), sizeof(bases)));
          base_entry.size = sizeof(bases);
@@ -1751,7 +1762,7 @@ index 7d2f1366d4..cb3a58521a 100644
              auto& index_entry = entries[count + 1];
              index_entry.binding = Shader::Backend::WGSL::MAX_PULLED_BUFFERS + 1;
              index_entry.buffer = indexed ? runtime.index.buffer : uniform_ring.Buffer();
-@@ -310,7 +358,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -310,7 +362,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
          }
          wgpu::BindGroupDescriptor desc{};
          desc.layout = pipeline->pulled_layout;
@@ -1760,7 +1771,7 @@ index 7d2f1366d4..cb3a58521a 100644
          desc.entries = entries.data();
          pulled_group = Thread::Get().device.CreateBindGroup(&desc);
      }
-@@ -403,6 +451,40 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -403,6 +455,68 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
              }
          }
      }
@@ -1792,6 +1803,34 @@ index 7d2f1366d4..cb3a58521a 100644
 +        compute.SetPipeline(pipeline->tessellation_finish);
 +        compute.DispatchWorkgroups(1);
 +        compute.End();
++        if (tessellation_records_capped) {
++            static std::atomic_bool overflow_warned{};
++            static std::atomic_bool overflow_pending{};
++            if (!overflow_warned.load() && !overflow_pending.exchange(true)) {
++                wgpu::BufferDescriptor readback_desc{};
++                readback_desc.size = sizeof(u32);
++                readback_desc.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst;
++                const auto readback = device.CreateBuffer(&readback_desc);
++                encoder.CopyBufferToBuffer(tessellation_args, 4 * sizeof(u32), readback, 0,
++                                           sizeof(u32));
++                scheduler.Flush();
++                readback.MapAsync(
++                    wgpu::MapMode::Read, 0, sizeof(u32), wgpu::CallbackMode::AllowSpontaneous,
++                    [readback](wgpu::MapAsyncStatus status, wgpu::StringView) {
++                        if (status == wgpu::MapAsyncStatus::Success) {
++                            const auto* overflow =
++                                static_cast<const u32*>(readback.GetConstMappedRange());
++                            if (*overflow && !overflow_warned.exchange(true)) {
++                                LOG_WARNING(Render,
++                                            "WebGPU: tessellation record buffer overflow; "
++                                            "dropping primitives beyond capacity");
++                            }
++                            readback.Unmap();
++                        }
++                        overflow_pending.store(false);
++                    });
++            }
++        }
 +        desc.layout = pipeline->tessellation_read_layout;
 +        desc.entryCount = 2;
 +        tessellation_group = device.CreateBindGroup(&desc);
@@ -1801,7 +1840,7 @@ index 7d2f1366d4..cb3a58521a 100644
      if (scheduler.InRenderPass() && scheduler.PassConflicts(written_buffers, read_buffers)) {
          scheduler.EndRenderPass();
      }
-@@ -420,6 +502,9 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -420,6 +534,9 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
      if (pulled_group) {
          pass.SetBindGroup(Shader::Backend::WGSL::PULLED_VERTEX_GROUP, pulled_group);
      }
@@ -1811,7 +1850,7 @@ index 7d2f1366d4..cb3a58521a 100644
      // WebGPU rejects draws reading past a vertex binding (and the whole command buffer with
      // them), while the guest just reads zeros; widen bindings to the buffer end or skip the draw.
      std::array<u64, Maxwell::NumVertexArrays> vertex_sizes{};
-@@ -460,7 +545,16 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -460,7 +577,16 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
                                    regs.blend_color.a};
      pass.SetBlendConstant(&blend_color);
      pass.SetStencilReference(regs.stencil_front_ref & 0xFF);
