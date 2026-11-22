@@ -735,6 +735,7 @@ async function loadFile(file) {
     setRomStatus(`${rom.name} isn't a valid homebrew .nro file; it may be damaged or incomplete. Choose another file.`);
     return;
   }
+  setRomStatus(`Starting ${rom.name}...`);
 
   try {
     if (!await inspectGpu()) {

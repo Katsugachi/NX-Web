@@ -295,8 +295,8 @@ window.addEventListener('dragover', event => {
   if (event.dataTransfer) event.dataTransfer.dropEffect = $('library').hidden ? 'none' : 'copy';
 });
 window.addEventListener('drop', event => {
-  event.preventDefault();
-  if ($('library').hidden || $('drop-zone').contains(event.target) || !event.dataTransfer?.files.length) return;
+  const handled = event.defaultPrevented; event.preventDefault();
+  if (handled || $('library').hidden || $('drop-zone').contains(event.target) || event.target.closest?.('dialog') || !event.dataTransfer?.files.length) return;
   $('drop-zone').dispatchEvent(new DragEvent('drop', { dataTransfer:event.dataTransfer, bubbles:true, cancelable:true }));
 });
 $('clear-recent').addEventListener('click', () => { recent = []; saveRecent(); }); renderRecent();
