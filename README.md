@@ -42,14 +42,16 @@ The server binds localhost only; use a suitably configured HTTPS server for host
 of [Shubin123/eden_emscripten](https://github.com/Shubin123/eden_emscripten).
 `scripts/build-engine.sh` installs/activates Emscripten **7.0.1** under `~/emsdk`
 (override with `EMSDK` / `EMSDK_VERSION`), installs user-local CMake 4.4.5 if the
-current version is too old, configures the engine, applies the tracked CPM dependency
+current version is too old, configures the engine, applies the tracked engine/dependency
 patches, and builds the engine and archive decoder. Set `EDEN_BUILD_JOBS=8` to change
 the default four parallel jobs. Expect substantial downloads, disk use and build time.
 
 Patches in `engine-patches/` add Sirit's missing `<cstdlib>` and an Emscripten-only
-ReShade `<alloca.h>`. Both already-applied and fresh-cache states are supported;
+ReShade `<alloca.h>`, and connect the browser's default player-one Pro Controller.
+Both already-applied and fresh-cache states are supported;
 unexpected dependency changes fail clearly instead of silently skipping patches.
-No tracked engine source is modified. All `eden*.js` / `eden*.wasm` outputs and a
+The controller source patch is reversed on exit if the script applied it; the engine
+submodule revision stays pinned. All `eden*.js` / `eden*.wasm` outputs and a
 checksum manifest are copied into **gitignored `web/runtime/`**. Build again after
 updating the submodule. Do not change the engine revision without revalidating it.
 
@@ -141,6 +143,7 @@ local smoke checks.
 ```sh
 npm test                 # Node tests; runtime tests included when artifacts exist
 npm run test:runtime     # requires actual built artifacts; never silently skips
+ROM_PATH=/path/to/hello-world.nro node tests/keyboard_browser.mjs # Chrome CDP 9227
 npm audit
 ```
 
@@ -150,6 +153,9 @@ isolation/error paths. The artifact smoke check supports Emscripten 7's minified
 exports and verifies Memory64/shared-memory flags. CI runs frontend tests on PRs.
 An opt-in `workflow_dispatch` engine job caches emsdk/CPM and uploads runtime
 artifacts. Node tests do **not** prove browser rendering or commercial compatibility.
+The optional keyboard browser test uses an isolated context and an ephemeral server
+port, and checks that Plus exits the libnx hello-world template with default,
+remapped and reset bindings. Override `CDP_URL` to use a different running Chrome.
 
 ## Roadmap
 

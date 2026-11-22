@@ -26,9 +26,19 @@ git -C "$root" submodule update --init engine
 export EDEN_BUILD_JOBS=${EDEN_BUILD_JOBS:-4}
 export EDEN_DEV=0 EDEN_CONFIGURE_ONLY=0
 EDEN_CONFIGURE_ONLY=1 bash "$root/engine/tools/web/build.sh"
+source_patched=false
+cleanup() {
+  local status=$?
+  if "$source_patched"; then
+    patch --batch --reverse --fuzz=0 -d "$root/engine" -p1 < "$root/engine-patches/web-player-one.patch" || status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
 for fix in "$root"/engine-patches/*.patch; do
   if patch --dry-run --batch --forward --fuzz=0 --silent -d "$root/engine" -p1 < "$fix"; then
     patch --batch --forward --fuzz=0 -d "$root/engine" -p1 < "$fix"
+    if [ "$fix" = "$root/engine-patches/web-player-one.patch" ]; then source_patched=true; fi
   elif patch --dry-run --batch --fuzz=0 --silent --reverse -d "$root/engine" -p1 < "$fix"; then
     echo "Already applied: $(basename "$fix")"
   else

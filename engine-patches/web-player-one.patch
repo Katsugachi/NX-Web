@@ -1,0 +1,12 @@
+--- a/src/yuzu_cmd/emscripten_main.cpp
++++ b/src/yuzu_cmd/emscripten_main.cpp
+@@ -163,6 +163,9 @@
+ }
+ 
+ void ApplyWebSettings() {
++    auto& player = Settings::values.players.GetValue()[0];
++    player.connected = true;
++    player.controller_type = Settings::ControllerType::ProController;
+     // The Switch exposes four CPU cores; run one host thread per emulated core.
+     Settings::values.use_multi_core.SetValue(true);
+     Settings::values.cpu_backend.SetValue(Settings::CpuBackend::Dynarmic);
