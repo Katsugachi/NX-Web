@@ -38,6 +38,14 @@ export const DEFAULT_BINDINGS = Object.fromEntries(ACTIONS.map(action => [action
 const STORAGE_KEY = 'nx-keyboard-bindings';
 const validKey = key => typeof key === 'string' && /^(Shift\+)?(Key[A-Z]|Digit[0-9]|F[1-9]|F1[0-2]|Arrow(Up|Down|Left|Right)|Enter|Backspace|Escape|Tab|Space|Backquote|Minus|Equal|BracketLeft|BracketRight|Backslash|Semicolon|Quote|Comma|Period|Slash|CapsLock|Insert|Delete|Home|End|PageUp|PageDown)$/.test(key);
 export function bindingKey(event) { return `${event.shiftKey ? 'Shift+' : ''}${event.code}`; }
+export function isKeyboardField(target) {
+  return target?.isContentEditable || /^(INPUT|SELECT|TEXTAREA)$/.test(target?.tagName);
+}
+export function usesNativeKeys(event) {
+  return isKeyboardField(event.target)
+    || (event.key === 'Enter' && /^(A|BUTTON)$/.test(event.target?.tagName))
+    || (event.key === ' ' && event.target?.tagName === 'BUTTON');
+}
 export function keyLabel(key) {
   return key.replace(/Key|Digit/g, '').replace('Shift+Slash', '?').replace('Backquote', '`')
     .replace('ArrowUp', '↑').replace('ArrowDown', '↓').replace('ArrowLeft', '←').replace('ArrowRight', '→');

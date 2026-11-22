@@ -37,7 +37,17 @@ key('keydown','KeyV'); assert.equal(buttons.get(Button.A),0,'dialogs suppress co
 document.querySelector = ()=>null;
 key('keydown','KeyV',{ctrlKey:true}); assert.equal(buttons.get(Button.A),0,'browser modifiers are ignored');
 assert.equal(key('keydown','KeyV').defaultPrevented,true);
+const focusSelect = new Event('focusin');
+Object.defineProperty(focusSelect, 'target', { value:{ tagName:'SELECT' } });
+document.dispatchEvent(focusSelect);
+assert.equal(buttons.get(Button.A),0,'focusing a form field releases held controls');
 key('keyup','KeyV');
+const activate = new Event('keydown', { cancelable:true });
+Object.assign(activate, { code:'Enter', key:'Enter' });
+Object.defineProperty(activate, 'target', { value:{ tagName:'BUTTON' } });
+window.dispatchEvent(activate);
+assert.equal(activate.defaultPrevented,false,'Enter activates a focused button instead of sending Plus');
+assert.equal(buttons.get(Button.Plus),0);
 let frame;
 globalThis.requestAnimationFrame = callback=>{frame=callback;};
 let pads = [{index:0,id:'Test controller',mapping:'standard',buttons:[{pressed:true,value:1}],axes:[0.5,0,0,0]}];

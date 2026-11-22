@@ -3,7 +3,7 @@
 // virtual gamepads. Keyboard and touch drive player 1; gamepads drive player 1 too, or one player
 // each when multiplayer is on. Rumble the game asks for is played on the matching gamepad.
 
-import { ACTIONS, bindingKey, readBindings } from './bindings.js';
+import { ACTIONS, bindingKey, isKeyboardField, readBindings, usesNativeKeys } from './bindings.js';
 
 /// VirtualGamepad::VirtualButton ids in the engine.
 export const Button = {
@@ -113,7 +113,7 @@ export function setupInput(getModule) {
   const heldKeys = new Map();
   let bindings = readBindings();
   function updateKeyboard() {
-    const held = ACTIONS.filter(action => [...heldKeys.values()].includes(bindings[action.id]));
+    const held = ACTIONS.filter(action => !action.hotkey && [...heldKeys.values()].includes(bindings[action.id]));
     keyboard.buttons = new Set(held.filter(action => action.button).map(action => Button[action.button]));
     keyboard.sticks = [[0, 0], [0, 0]];
     for (const action of held) {
@@ -125,10 +125,8 @@ export function setupInput(getModule) {
     }
     flush();
   }
-  const isTyping = target => target instanceof HTMLElement &&
-    (target.isContentEditable || /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName));
   window.addEventListener('keydown', e => {
-    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || isTyping(e.target) || document.querySelector('dialog[open]')) return;
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || usesNativeKeys(e) || document.querySelector('dialog[open]')) return;
     const key = bindingKey(e);
     if (!ACTIONS.some(action => !action.hotkey && bindings[action.id] === key)) return;
     e.preventDefault();
@@ -137,12 +135,16 @@ export function setupInput(getModule) {
   window.addEventListener('keyup', e => {
     if (heldKeys.delete(e.code)) updateKeyboard();
   });
-  window.addEventListener('blur', () => { heldKeys.clear(); updateKeyboard(); });
-  window.addEventListener('nx-release-input', () => { heldKeys.clear(); updateKeyboard(); });
-  window.addEventListener('nx-bindings', event => {
-    bindings = event.detail;
+  function releaseKeyboard() {
     heldKeys.clear();
     updateKeyboard();
+  }
+  window.addEventListener('blur', releaseKeyboard);
+  window.addEventListener('nx-release-input', releaseKeyboard);
+  document.addEventListener('focusin', event => { if (isKeyboardField(event.target)) releaseKeyboard(); });
+  window.addEventListener('nx-bindings', event => {
+    bindings = event.detail;
+    releaseKeyboard();
   });
 
   // On-screen buttons: press while a pointer is down on them.
