@@ -6,8 +6,12 @@ const MAX_ASSETS = 4096;
 const MAX_BYTES = 256 * 1024 * 1024;
 const ROM = /\.(nsp|xci|nro|nca|nso)$/i;
 
+function pathParts(name) {
+  return name.split('/').filter(part => part && part !== '.');
+}
+
 function safeParts(name) {
-  const parts = name.split('/').filter(part => part && part !== '.');
+  const parts = pathParts(name);
   if (/[\\:\0]/.test(name) || parts.includes('..')) {
     throw new Error(`${name}: unsafe homebrew asset path`);
   }
@@ -36,9 +40,9 @@ export function bundledSdFiles(entries, roms) {
   const paths = new Set();
   let bytes = 0;
   for (const entry of entries) {
-    const parts = safeParts(entry.name);
-    const name = parts.join('/');
+    const name = pathParts(entry.name).join('/');
     if (!name.startsWith(prefix) || ROM.test(name)) continue;
+    const parts = safeParts(entry.name);
     if (parts.some(part => part === '.DS_Store' || part.startsWith('._'))) continue;
     if (paths.has(name)) throw new Error(`${entry.name}: duplicate homebrew asset`);
     if (!entry.supported || !Number.isSafeInteger(entry.size) || entry.size < 0) {

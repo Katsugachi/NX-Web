@@ -35,6 +35,7 @@ assert.throws(() => bundledSdFiles([{ ...picked[0], supported: false }], [entrie
 const dotted = await readZipEntries(new File([writeZip([
   { name: './switch/App/App.nro', data },
   { name: './switch/App/data/x', data },
+  { name: 'docs/FAQ:Linux.txt', data },
 ])], 'App.zip'));
 const dottedAssets = bundledSdFiles(dotted, [dotted[0]]);
 assert.deepEqual(dottedAssets.map(entry => entry.name), ['switch/App/data/x']);
