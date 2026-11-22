@@ -1195,7 +1195,7 @@ index d89bcb9f65..0654d34ce4 100644
      u32 rectangle_restart_index{};
      std::span<const u8> rectangle_inline_indices;
 diff --git a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
-index ba40404856..955336941a 100644
+index ba40404856..dbcf029c14 100644
 --- a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
 +++ b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
 @@ -107,6 +107,17 @@ Shader::RuntimeInfo MakeRuntimeInfo(const GraphicsPipelineKey& key, const Shader
@@ -1374,28 +1374,35 @@ index ba40404856..955336941a 100644
              const u32 packed_cbuf_first{Shader::Backend::WGSL::PackedCbufFirst(info, CbufLimit(stage))};
              for (u32 desc_index = 0; desc_index < info.constant_buffer_descriptors.size(); ++desc_index) {
                  const auto& desc{info.constant_buffer_descriptors[desc_index]};
-@@ -803,13 +886,34 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+@@ -803,13 +886,41 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
              }
          }
          wgpu::BindGroupLayoutDescriptor layout_desc{};
 +        if (IsGeometry() || IsTessellation()) {
-+            u32 storage = static_cast<u32>(pulled_buffers.size()) + 1;
-+            u32 uniforms = 2;
-+            for (const auto& entry : entries) {
-+                if (entry.visibility != wgpu::ShaderStage::Vertex &&
-+                    entry.visibility != wgpu::ShaderStage::Compute) {
-+                    continue;
++            for (const auto visibility : {wgpu::ShaderStage::Compute, wgpu::ShaderStage::Vertex,
++                                          wgpu::ShaderStage::Fragment}) {
++                const bool pulled = IsTessellation() ? visibility == wgpu::ShaderStage::Compute
++                                                    : visibility == wgpu::ShaderStage::Vertex;
++                u32 storage = pulled ? static_cast<u32>(pulled_buffers.size()) + 1 : 0;
++                u32 uniforms = pulled ? 2 : 1;
++                if (IsTessellation()) {
++                    storage += visibility == wgpu::ShaderStage::Compute ? 3
++                               : visibility == wgpu::ShaderStage::Vertex ? 2 : 0;
 +                }
-+                storage += entry.buffer.type == wgpu::BufferBindingType::ReadOnlyStorage ||
-+                           entry.buffer.type == wgpu::BufferBindingType::Storage;
-+                uniforms += entry.buffer.type == wgpu::BufferBindingType::Uniform;
-+            }
-+            storage += IsTessellation() ? 3 : 0;
-+            if (storage > cache.max_storage_buffers || uniforms > cache.max_uniform_buffers) {
-+                LOG_WARNING(Render,
-+                            "WebGPU: geometry pipeline {:016x} exceeds vertex binding limits",
-+                            key.Hash());
-+                return false;
++                for (const auto& entry : entries) {
++                    if ((entry.visibility & visibility) == wgpu::ShaderStage::None) {
++                        continue;
++                    }
++                    storage += entry.buffer.type == wgpu::BufferBindingType::ReadOnlyStorage ||
++                               entry.buffer.type == wgpu::BufferBindingType::Storage;
++                    uniforms += entry.buffer.type == wgpu::BufferBindingType::Uniform;
++                }
++                if (storage > cache.max_storage_buffers || uniforms > cache.max_uniform_buffers) {
++                    LOG_WARNING(Render,
++                                "WebGPU: expanded-stage pipeline {:016x} exceeds binding limits",
++                                key.Hash());
++                    return false;
++                }
 +            }
 +        }
          layout_desc.entryCount = entries.size();
@@ -1410,7 +1417,7 @@ index ba40404856..955336941a 100644
          draw_entry.buffer.type = wgpu::BufferBindingType::Uniform;
          draw_entry.buffer.hasDynamicOffset = true;
          draw_entry.buffer.minBindingSize = sizeof(DrawInfo);
-@@ -817,23 +921,25 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+@@ -817,23 +928,26 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
          draw_layout_desc.entryCount = 1;
          draw_layout_desc.entries = &draw_entry;
          const wgpu::BindGroupLayout draw_layout = device.CreateBindGroupLayout(&draw_layout_desc);
@@ -1418,20 +1425,21 @@ index ba40404856..955336941a 100644
 -            std::vector<wgpu::BindGroupLayoutEntry> pulled_entries(pulled_buffers.size() + 1 +
 -                                                                  (key.fill_rectangle ? 1 : 0));
 +        if (!pulled_buffers.empty() || key.fill_rectangle || IsGeometry() || IsTessellation()) {
++            const auto pulled_visibility = IsTessellation() ? wgpu::ShaderStage::Compute
++                                                            : wgpu::ShaderStage::Vertex;
 +            std::vector<wgpu::BindGroupLayoutEntry> pulled_entries(
 +                pulled_buffers.size() + 1 +
 +                (key.fill_rectangle || IsGeometry() || IsTessellation() ? 1 : 0));
              for (u32 i = 0; i < pulled_buffers.size(); ++i) {
                  pulled_entries[i].binding = i;
 -                pulled_entries[i].visibility = wgpu::ShaderStage::Vertex;
-+                pulled_entries[i].visibility =
-+                    wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Compute;
++                pulled_entries[i].visibility = pulled_visibility;
                  pulled_entries[i].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
              }
              auto& bases = pulled_entries[pulled_buffers.size()];
              bases.binding = Shader::Backend::WGSL::MAX_PULLED_BUFFERS;
 -            bases.visibility = wgpu::ShaderStage::Vertex;
-+            bases.visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Compute;
++            bases.visibility = pulled_visibility;
              bases.buffer.type = wgpu::BufferBindingType::Uniform;
              bases.buffer.minBindingSize = Shader::Backend::WGSL::MAX_PULLED_BUFFERS * 4;
 -            if (key.fill_rectangle) {
@@ -1439,11 +1447,11 @@ index ba40404856..955336941a 100644
                  auto& indices = pulled_entries.back();
                  indices.binding = Shader::Backend::WGSL::MAX_PULLED_BUFFERS + 1;
 -                indices.visibility = wgpu::ShaderStage::Vertex;
-+                indices.visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Compute;
++                indices.visibility = pulled_visibility;
                  indices.buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
              }
              wgpu::BindGroupLayoutDescriptor pulled_desc{};
-@@ -841,10 +947,42 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+@@ -841,10 +955,42 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
              pulled_desc.entries = pulled_entries.data();
              variant.pulled_layout = device.CreateBindGroupLayout(&pulled_desc);
          }
@@ -1489,7 +1497,7 @@ index ba40404856..955336941a 100644
          pipeline_layout_desc.bindGroupLayouts = layouts.data();
          const wgpu::PipelineLayout pipeline_layout = device.CreatePipelineLayout(&pipeline_layout_desc);
 
-@@ -905,6 +1043,17 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+@@ -905,6 +1051,17 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
          const auto& dynamic = state.dynamic_state;
          desc.primitive.topology = key.fill_rectangle ? wgpu::PrimitiveTopology::TriangleList
                                                     : MaxwellToWGPU::Topology(state.topology);
@@ -1507,7 +1515,7 @@ index ba40404856..955336941a 100644
          if (desc.primitive.topology == wgpu::PrimitiveTopology::TriangleStrip ||
              desc.primitive.topology == wgpu::PrimitiveTopology::LineStrip) {
              desc.primitive.stripIndexFormat = variant_key.strip_index_format;
-@@ -1192,6 +1341,10 @@ bool GraphicsPipeline::Configure(bool is_indexed) {
+@@ -1192,6 +1349,10 @@ bool GraphicsPipeline::Configure(bool is_indexed) {
      }
      render_pipeline = *variant->pipeline;
      pulled_layout = variant->pulled_layout;
