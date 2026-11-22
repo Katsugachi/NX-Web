@@ -1,0 +1,540 @@
+diff --git a/src/shader_recompiler/backend/wgsl/emit_wgsl.h b/src/shader_recompiler/backend/wgsl/emit_wgsl.h
+index 3c645eb845..07bb52292a 100644
+--- a/src/shader_recompiler/backend/wgsl/emit_wgsl.h
++++ b/src/shader_recompiler/backend/wgsl/emit_wgsl.h
+@@ -53,6 +53,7 @@ constexpr u32 PULLED_VERTEX_GROUP = 2;
+ constexpr u32 MAX_PULLED_BUFFERS = 8;
+ 
+ struct Options {
++    bool fill_rectangle = false;
+     /// Kind of each texture descriptor element, in descriptor order.
+     std::vector<TextureSampleKind> texture_kinds;
+     /// Interpolation the next stage declares for each generic (vertex outputs must match).
+diff --git a/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp b/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
+index aa7565f1cc..ac5cb569b9 100644
+--- a/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
++++ b/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
+@@ -113,11 +113,12 @@ std::string AttributeConversion(AttributeType type, std::string_view value) {
+ 
+ /// WGSL expression of type `input_type` reading attribute `index` from its pulled buffer.
+ std::string PulledAttributeValue(const PulledAttribute& attr, const PulledBuffer& buffer,
+-                                 size_t index, std::string_view input_type) {
++                                 size_t index, std::string_view input_type, bool rectangle = false) {
+     using Kind = PulledAttribute::Kind;
+     const std::string address{fmt::format(
+         "(vpull_base[{}u][{}u] + {} * {}u + {}u)", attr.buffer / 4, attr.buffer % 4,
+-        buffer.per_instance ? "input.instance_index" : "input.vertex_index", buffer.stride,
++        buffer.per_instance ? "input.instance_index"
++                            : rectangle ? "v_vertex_id" : "input.vertex_index", buffer.stride,
+         attr.offset)};
+     const auto word{[&](u32 byte_offset) {
+         return fmt::format("vpull_read{}({} + {}u)", attr.buffer, address, byte_offset);
+@@ -504,8 +505,28 @@ std::string EmitContext::Finish(const IR::Program& program) {
+                      "return max(vec4<f32>(vec3<f32>(f32(x), f32(y), f32(z)) / 511.0, f32(w)),"
+                      " vec4<f32>(-1.0));\n}\n";
+         }
+-        entry += "@vertex fn main(input: VSInput) -> VSOutput {\n"
+-                 "v_vertex_id = input.vertex_index;\nv_instance_id = input.instance_index;\n";
++        if (options.fill_rectangle) {
++            entry += fmt::format("@group({}) @binding({}) var<storage, read> rect_indices: array<u32>;\n",
++                                 PULLED_VERTEX_GROUP, MAX_PULLED_BUFFERS + 1);
++            entry += "fn rect_guest(input: VSInput, vertex: u32) -> VSOutput {\n"
++                     "v_position = vec4<f32>();\nv_point_size = 0.0;\n";
++            for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
++                if (info.loads.Generic(index)) {
++                    entry += fmt::format("in_attr{} = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n", index);
++                }
++                if (info.stores.Generic(index)) {
++                    entry += fmt::format("out_attr{} = vec4<f32>();\n", index);
++                }
++            }
++            if (program.local_memory_size > 0) {
++                entry += fmt::format("lmem = array<u32, {}>();\n",
++                                     Common::DivCeil(program.local_memory_size, 4U));
++            }
++            entry += "v_vertex_id = vertex;\nv_instance_id = input.instance_index;\n";
++        } else {
++            entry += "@vertex fn main(input: VSInput) -> VSOutput {\n"
++                     "v_vertex_id = input.vertex_index;\nv_instance_id = input.instance_index;\n";
++        }
+         for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
+             const AttributeType type{runtime_info.generic_input_types[index]};
+             if (!info.loads.Generic(index) || type == AttributeType::Disabled ||
+@@ -520,10 +541,12 @@ std::string EmitContext::Finish(const IR::Program& program) {
+                     value = fmt::format("vpull_read{}(vpull_base[{}u][{}u] + {} * {}u + {}u)",
+                                         pulled.buffer, pulled.buffer / 4, pulled.buffer % 4,
+                                         buffer.per_instance ? "input.instance_index"
+-                                                            : "input.vertex_index",
++                                            : options.fill_rectangle ? "v_vertex_id"
++                                                                     : "input.vertex_index",
+                                         buffer.stride, pulled.offset);
+                 } else {
+-                    value = PulledAttributeValue(pulled, buffer, index, AttributeInputType(type));
++                    value = PulledAttributeValue(pulled, buffer, index, AttributeInputType(type),
++                                                 options.fill_rectangle);
+                 }
+             }
+             if (options.attribute_snorm_1010102[index]) {
+@@ -549,6 +572,74 @@ std::string EmitContext::Finish(const IR::Program& program) {
+             }
+         }
+         entry += "return output;\n}\n";
++        if (options.fill_rectangle) {
++            entry += R"(
++fn rect_cross(a: vec2<f32>, b: vec2<f32>) -> f32 { return a.x*b.y - a.y*b.x; }
++@vertex fn main(input: VSInput) -> VSOutput {
++    let local = input.vertex_index - draw_info.padding;
++    let tri = local / 6u;
++    var corner = local % 6u;
++    var vertices: array<VSOutput, 3>;
++    for (var k = 0u; k < 3u; k++) {
++        var vertex = draw_info.padding + tri*3u + k;
++        if (draw_info.render_area.z != 0.0) {
++            vertex = rect_indices[vertex] + draw_info.base_vertex;
++        }
++        vertices[k] = rect_guest(input, vertex);
++    }
++    let fallback = select(0u, corner, corner < 3u);
++    let p0 = vertices[0].position;
++    let p1 = vertices[1].position;
++    let p2 = vertices[2].position;
++    if (p0.w <= 0.0 || p1.w <= 0.0 || p2.w <= 0.0) { return vertices[fallback]; }
++    let a = p0.xy / p0.w;
++    let b = p1.xy / p1.w;
++    let c = p2.xy / p2.w;
++    let area = rect_cross(b-a, c-a);
++    if (area == 0.0) { return vertices[fallback]; }
++    if (area < 0.0) {
++        if (corner == 1u) { corner = 2u; }
++        else if (corner == 2u) { corner = 1u; }
++        else if (corner == 4u) { corner = 5u; }
++        else if (corner == 5u) { corner = 4u; }
++    }
++    let lo = min(a, min(b,c));
++    let hi = max(a, max(b,c));
++    let corners = array<vec2<f32>, 6>(lo, vec2<f32>(hi.x,lo.y), hi,
++                                     lo, hi, vec2<f32>(lo.x,hi.y));
++    let point = corners[corner];
++    let l0 = rect_cross(b-point,c-point) / area;
++    let l1 = rect_cross(c-point,a-point) / area;
++    let l2 = 1.0 - l0 - l1;
++    let weights = vec3<f32>(l0/p0.w, l1/p1.w, l2/p2.w);
++    let invw = weights.x + weights.y + weights.z;
++    if (invw == 0.0) { return vertices[fallback]; }
++    let w = 1.0 / invw;
++    let z = dot(weights, vec3<f32>(p0.z,p1.z,p2.z));
++    var output: VSOutput;
++    output.position = vec4<f32>(point*w,z*w,w);
++)";
++            for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
++                if (!info.stores.Generic(index)) {
++                    continue;
++                }
++                switch (options.output_interpolation[index]) {
++                case Interpolation::Flat:
++                    entry += fmt::format("output.out{0} = vertices[0].out{0};\n", index);
++                    break;
++                case Interpolation::NoPerspective:
++                    entry += fmt::format("output.out{0} = l0*vertices[0].out{0} + "
++                                         "l1*vertices[1].out{0} + l2*vertices[2].out{0};\n", index);
++                    break;
++                default:
++                    entry += fmt::format("output.out{0} = (weights.x*vertices[0].out{0} + "
++                                         "weights.y*vertices[1].out{0} + "
++                                         "weights.z*vertices[2].out{0}) * w;\n", index);
++                    break;
++                }
++            }
++            entry += "return output;\n}\n";
++        }
+         break;
+     }
+     case Stage::Fragment: {
+diff --git a/src/video_core/renderer_webgpu/maxwell_to_wgpu.h b/src/video_core/renderer_webgpu/maxwell_to_wgpu.h
+index 76c46a1a84..928dc2a09a 100644
+--- a/src/video_core/renderer_webgpu/maxwell_to_wgpu.h
++++ b/src/video_core/renderer_webgpu/maxwell_to_wgpu.h
+@@ -15,6 +15,23 @@ using Maxwell = Tegra::Engines::Maxwell3D::Regs;
+ /// Marks vertex attributes WebGPU cannot read.
+ constexpr wgpu::VertexFormat INVALID_VERTEX_FORMAT = static_cast<wgpu::VertexFormat>(0);
+ 
++inline bool IsRectangleDraw(const Maxwell& regs, Maxwell::PrimitiveTopology topology) {
++    if (regs.fill_via_triangle_mode != Maxwell::FillViaTriangleMode::FillBoundingBox) {
++        return false;
++    }
++    switch (topology) {
++    case Maxwell::PrimitiveTopology::Triangles:
++    case Maxwell::PrimitiveTopology::TriangleStrip:
++    case Maxwell::PrimitiveTopology::TriangleFan:
++    case Maxwell::PrimitiveTopology::Quads:
++    case Maxwell::PrimitiveTopology::QuadStrip:
++    case Maxwell::PrimitiveTopology::Polygon:
++        return true;
++    default:
++        return false;
++    }
++}
++
+ /// Topology after index conversion (quads, fans, polygons and loops become lists).
+ inline wgpu::PrimitiveTopology Topology(Maxwell::PrimitiveTopology topology) {
+     switch (topology) {
+diff --git a/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp b/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
+index 83bdb4d627..94022b7d6a 100644
+--- a/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
+@@ -79,6 +79,32 @@ void ConvertIndices(Maxwell::PrimitiveTopology topology, std::span<const u32> in
+         break;
+     }
+ }
++
++void ConvertRectangleIndices(Maxwell::PrimitiveTopology topology, std::span<const u32> in,
++                             std::vector<u32>& out, bool restart, u32 restart_index) {
++    out.clear();
++    std::vector<u32> triangle_list;
++    size_t first = 0;
++    for (size_t end = 0; end <= in.size(); ++end) {
++        if (end != in.size() && (!restart || in[end] != restart_index)) {
++            continue;
++        }
++        const auto segment = in.subspan(first, end - first);
++        if (topology == Maxwell::PrimitiveTopology::TriangleStrip) {
++            triangle_list.clear();
++            for (size_t i = 0; i + 2 < segment.size(); ++i) {
++                triangle_list.insert(triangle_list.end(),
++                                     {segment[i + (i & 1)], segment[i + 1 - (i & 1)],
++                                      segment[i + 2]});
++            }
++        } else {
++            ConvertIndices(topology, segment, triangle_list);
++        }
++        triangle_list.resize(triangle_list.size() / 3 * 3);
++        out.insert(out.end(), triangle_list.begin(), triangle_list.end());
++        first = end + 1;
++    }
++}
+ } // Anonymous namespace
+ 
+ Buffer::Buffer(BufferCacheRuntime& runtime_, DAddr cpu_addr_, u64 size_bytes_, bool)
+@@ -133,7 +159,8 @@ void Buffer::ImmediateDownload(size_t offset, std::span<u8> data) noexcept {
+ BufferCacheRuntime::BufferCacheRuntime(Tegra::MaxwellDeviceMemoryManager& device_memory_,
+                                        Scheduler& scheduler_)
+     : device_memory{device_memory_}, scheduler{scheduler_},
+-      index_ring{scheduler_, 8ULL << 20, wgpu::BufferUsage::Index} {}
++      index_ring{scheduler_, 8ULL << 20, wgpu::BufferUsage::Index},
++      rectangle_index_ring{scheduler_, 8ULL << 20, wgpu::BufferUsage::Storage} {}
+ 
+ StagingBufferMap BufferCacheRuntime::UploadStagingBuffer(size_t size) {
+     StagingBufferMap map;
+@@ -208,7 +235,7 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
+                                          u32 first, u32 count, const wgpu::Buffer& buffer,
+                                          u32 offset, u32 size, DAddr cpu_addr) {
+     const u32 index_size = IndexSize(index_format);
+-    const bool convert = NeedsConversion(topology) || index_size == 1;
++    const bool convert = rectangle_draw || NeedsConversion(topology) || index_size == 1;
+     if (!convert || cpu_addr == 0) {
+         index.buffer = buffer;
+         index.offset = offset;
+@@ -236,18 +263,25 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
+             break;
+         }
+     }
+-    ConvertIndices(topology, indices, index_scratch);
++    if (rectangle_draw) {
++        ConvertRectangleIndices(topology, indices, index_scratch, rectangle_restart,
++                                rectangle_restart_index);
++    } else {
++        ConvertIndices(topology, indices, index_scratch);
++    }
++    const u32 rectangle_count = static_cast<u32>(index_scratch.size());
+     if (index_scratch.empty()) {
+         index_scratch.push_back(0);
+     }
+     const auto bytes = std::as_bytes(std::span(index_scratch));
+-    index.offset = index_ring.Push(
++    auto& ring = rectangle_draw ? rectangle_index_ring : index_ring;
++    index.offset = ring.Push(
+         std::span<const u8>(reinterpret_cast<const u8*>(bytes.data()), bytes.size()));
+-    index.buffer = index_ring.Buffer();
++    index.buffer = ring.Buffer();
+     index.size = bytes.size();
+     index.format = wgpu::IndexFormat::Uint32;
+     index.converted = true;
+-    index.count = static_cast<u32>(index_scratch.size());
++    index.count = rectangle_draw ? rectangle_count : static_cast<u32>(index_scratch.size());
+ }
+ 
+ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 first, u32 count) {
+@@ -255,18 +289,24 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
+     for (u32 i = 0; i < count; ++i) {
+         vertices[i] = first + i;
+     }
+-    ConvertIndices(topology, vertices, index_scratch);
++    if (rectangle_draw) {
++        ConvertRectangleIndices(topology, vertices, index_scratch, false, 0);
++    } else {
++        ConvertIndices(topology, vertices, index_scratch);
++    }
++    const u32 rectangle_count = static_cast<u32>(index_scratch.size());
+     if (index_scratch.empty()) {
+         index_scratch.push_back(first);
+     }
+     const auto bytes = std::as_bytes(std::span(index_scratch));
+-    index.offset = index_ring.Push(
++    auto& ring = rectangle_draw ? rectangle_index_ring : index_ring;
++    index.offset = ring.Push(
+         std::span<const u8>(reinterpret_cast<const u8*>(bytes.data()), bytes.size()));
+-    index.buffer = index_ring.Buffer();
++    index.buffer = ring.Buffer();
+     index.size = bytes.size();
+     index.format = wgpu::IndexFormat::Uint32;
+     index.converted = true;
+-    index.count = static_cast<u32>(index_scratch.size());
++    index.count = rectangle_draw ? rectangle_count : static_cast<u32>(index_scratch.size());
+ }
+ 
+ void BufferCacheRuntime::BindVertexBuffer(u32 binding, const wgpu::Buffer& buffer, u32 offset,
+diff --git a/src/video_core/renderer_webgpu/wgpu_buffer_cache.h b/src/video_core/renderer_webgpu/wgpu_buffer_cache.h
+index b6e5220f2c..9dece34e31 100644
+--- a/src/video_core/renderer_webgpu/wgpu_buffer_cache.h
++++ b/src/video_core/renderer_webgpu/wgpu_buffer_cache.h
+@@ -182,10 +182,14 @@ public:
+     std::array<VertexBinding, 32> vertex_bindings{};
+     u32 num_vertex_bindings{};
+     IndexBinding index;
++    bool rectangle_draw{};
++    bool rectangle_restart{};
++    u32 rectangle_restart_index{};
+ 
+     Tegra::MaxwellDeviceMemoryManager& device_memory;
+     Scheduler& scheduler;
+     UniformRing index_ring;
++    UniformRing rectangle_index_ring;
+     u64 memory_usage{};
+ 
+ private:
+diff --git a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
+index effd92eada..13760d3512 100644
+--- a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
+@@ -378,6 +378,8 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
+         return nullptr;
+     }
+     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
++    graphics_key.fill_rectangle = MaxwellToWGPU::IsRectangleDraw(
++        maxwell3d->regs, maxwell3d->draw_manager.draw_state.topology);
+     auto [it, is_new] = graphics_cache.try_emplace(graphics_key);
+     pipeline_stats.lookups.fetch_add(1, std::memory_order_relaxed);
+     if (is_new) {
+@@ -515,7 +517,8 @@ GraphicsPipeline::GraphicsPipeline(PipelineCache& cache_, const GraphicsPipeline
+ }
+ 
+ u32 GraphicsPipeline::CbufLimit(size_t stage) const {
+-    return cache.max_uniform_buffers - 1 - (stage == 0 && !pulled_buffers.empty() ? 1 : 0);
++    return cache.max_uniform_buffers - 1 -
++           (stage == 0 && (!pulled_buffers.empty() || key.fill_rectangle) ? 1 : 0);
+ }
+ 
+ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant, bool infos_only) {
+@@ -595,6 +598,14 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+                 pulled_buffers.push_back(buffer);
+             }
+         }
++        if (key.fill_rectangle) {
++            pulled_buffers.clear();
++            for (u32 buffer = 0; buffer < Maxwell::NumVertexArrays; ++buffer) {
++                if (buffer_read[buffer]) {
++                    pulled_buffers.push_back(buffer);
++                }
++            }
++        }
+         if (pulled_buffers.size() > Shader::Backend::WGSL::MAX_PULLED_BUFFERS) {
+             LOG_WARNING(Render, "WebGPU: pipeline {:016x} reads too many vertex buffers", key.Hash());
+             return false;
+@@ -632,6 +643,7 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+                 options.output_interpolation = programs[5].info.interpolation;
+             }
+             if (program.stage == Shader::Stage::VertexB) {
++                options.fill_rectangle = key.fill_rectangle != 0;
+                 for (size_t attr = 0; attr < Maxwell::NumVertexAttributes; ++attr) {
+                     options.attribute_components[attr] = ProvidedComponents(key.state, attr);
+                     const auto& attribute = key.state.attributes[attr];
+@@ -762,18 +774,25 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+         draw_layout_desc.entryCount = 1;
+         draw_layout_desc.entries = &draw_entry;
+         const wgpu::BindGroupLayout draw_layout = device.CreateBindGroupLayout(&draw_layout_desc);
+-        if (!pulled_buffers.empty()) {
+-            std::vector<wgpu::BindGroupLayoutEntry> pulled_entries(pulled_buffers.size() + 1);
++        if (!pulled_buffers.empty() || key.fill_rectangle) {
++            std::vector<wgpu::BindGroupLayoutEntry> pulled_entries(pulled_buffers.size() + 1 +
++                                                                  (key.fill_rectangle ? 1 : 0));
+             for (u32 i = 0; i < pulled_buffers.size(); ++i) {
+                 pulled_entries[i].binding = i;
+                 pulled_entries[i].visibility = wgpu::ShaderStage::Vertex;
+                 pulled_entries[i].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+             }
+-            auto& bases = pulled_entries.back();
++            auto& bases = pulled_entries[pulled_buffers.size()];
+             bases.binding = Shader::Backend::WGSL::MAX_PULLED_BUFFERS;
+             bases.visibility = wgpu::ShaderStage::Vertex;
+             bases.buffer.type = wgpu::BufferBindingType::Uniform;
+             bases.buffer.minBindingSize = Shader::Backend::WGSL::MAX_PULLED_BUFFERS * 4;
++            if (key.fill_rectangle) {
++                auto& indices = pulled_entries.back();
++                indices.binding = Shader::Backend::WGSL::MAX_PULLED_BUFFERS + 1;
++                indices.visibility = wgpu::ShaderStage::Vertex;
++                indices.buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
++            }
+             wgpu::BindGroupLayoutDescriptor pulled_desc{};
+             pulled_desc.entryCount = pulled_entries.size();
+             pulled_desc.entries = pulled_entries.data();
+@@ -841,7 +860,8 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+         desc.vertex.buffers = buffer_layouts.data();
+ 
+         const auto& dynamic = state.dynamic_state;
+-        desc.primitive.topology = MaxwellToWGPU::Topology(state.topology);
++        desc.primitive.topology = key.fill_rectangle ? wgpu::PrimitiveTopology::TriangleList
++                                                   : MaxwellToWGPU::Topology(state.topology);
+         if (desc.primitive.topology == wgpu::PrimitiveTopology::TriangleStrip ||
+             desc.primitive.topology == wgpu::PrimitiveTopology::LineStrip) {
+             desc.primitive.stripIndexFormat = variant_key.strip_index_format;
+diff --git a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.h b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.h
+index 5395885fc0..cb6cf006d7 100644
+--- a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.h
++++ b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.h
+@@ -37,6 +37,7 @@ using Maxwell = Tegra::Engines::Maxwell3D::Regs;
+ using Shader::Backend::WGSL::TextureSampleKind;
+ 
+ struct GraphicsPipelineKey {
++    u64 fill_rectangle{};
+     std::array<u64, 6> unique_hashes;
+     Vulkan::FixedPipelineState state;
+ 
+@@ -44,7 +45,7 @@ struct GraphicsPipelineKey {
+     bool operator==(const GraphicsPipelineKey& rhs) const noexcept;
+ 
+     size_t Size() const noexcept {
+-        return sizeof(unique_hashes) + state.Size();
++        return sizeof(fill_rectangle) + sizeof(unique_hashes) + state.Size();
+     }
+ };
+ 
+@@ -89,6 +90,10 @@ public:
+     /// skipped.
+     bool Configure(bool is_indexed);
+ 
++    bool IsRectangle() const {
++        return key.fill_rectangle != 0;
++    }
++
+     /// Resources resolved by the last Configure call.
+     wgpu::RenderPipeline render_pipeline;
+     /// Layout of the pulled vertex buffer group, null when every buffer has a vertex slot.
+diff --git a/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp b/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
+index 270365eb7e..fed4ff4a15 100644
+--- a/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
++#include <limits>
++
+ #include "common/alignment.h"
+ #include "common/logging.h"
+ #include "video_core/control/channel_state.h"
+@@ -114,7 +116,19 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+     if (!pipeline) {
+         return;
+     }
++    const bool rectangle = pipeline->IsRectangle();
++    if (rectangle && indirect) {
++        static bool logged = false;
++        if (!logged) {
++            LOG_WARNING(Render, "WebGPU: skipping indirect fill-rectangle draw");
++            logged = true;
++        }
++        return;
++    }
+     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
++    buffer_cache_runtime.rectangle_draw = rectangle;
++    buffer_cache_runtime.rectangle_restart = maxwell3d->regs.primitive_restart.enabled != 0;
++    buffer_cache_runtime.rectangle_restart_index = maxwell3d->regs.primitive_restart.index;
+     if (!pipeline->Configure(is_indexed)) {
+         return;
+     }
+@@ -131,7 +145,9 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+     u32 count = is_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count;
+     u32 first = is_indexed ? draw_state.index_buffer.first : draw_state.vertex_buffer.first;
+     s32 base_vertex = is_indexed ? static_cast<s32>(draw_state.base_index) : 0;
+-    const bool needs_conversion = MaxwellToWGPU::NeedsIndexConversion(draw_state.topology);
++    const bool needs_conversion =
++        MaxwellToWGPU::NeedsIndexConversion(draw_state.topology) ||
++        (rectangle && draw_state.topology == Maxwell::PrimitiveTopology::TriangleStrip);
+     if (indirect && needs_conversion) {
+         // Rewritten index lists cannot follow parameters the GPU wrote.
+         return;
+@@ -148,6 +164,9 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+         count = runtime.index.count;
+         first = 0;
+     }
++    if (rectangle && indexed && !runtime.index.converted) {
++        return;
++    }
+     if (!indirect && (count == 0 || instance_count == 0)) {
+         return;
+     }
+@@ -174,6 +193,10 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+     info.render_area = {width, height, 0.0f, 0.0f};
+     info.base_vertex = static_cast<u32>(base_vertex);
+     info.base_instance = draw_state.base_instance;
++    if (rectangle) {
++        info.padding = first;
++        info.render_area[2] = indexed ? 1.0f : 0.0f;
++    }
+     const f32 reduce_z = regs.depth_mode == Maxwell::DepthMode::MinusOneToOne ? 1.0f : 0.0f;
+     f32 min_depth = std::clamp(transform.translate_z - transform.scale_z * reduce_z, 0.0f, 1.0f);
+     f32 max_depth = std::clamp(transform.translate_z + transform.scale_z, 0.0f, 1.0f);
+@@ -236,8 +259,8 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+     // Vertex buffers past WebGPU's slots are read by the shader as storage buffers. Storage
+     // bindings start at 256-byte aligned offsets; the shader adds the remainder.
+     wgpu::BindGroup pulled_group;
+-    if (!pipeline->pulled_buffers.empty()) {
+-        std::array<wgpu::BindGroupEntry, Shader::Backend::WGSL::MAX_PULLED_BUFFERS + 1> entries{};
++    if (!pipeline->pulled_buffers.empty() || rectangle) {
++        std::array<wgpu::BindGroupEntry, Shader::Backend::WGSL::MAX_PULLED_BUFFERS + 2> entries{};
+         std::array<u32, Shader::Backend::WGSL::MAX_PULLED_BUFFERS> bases{};
+         const size_t count = pipeline->pulled_buffers.size();
+         for (size_t i = 0; i < count; ++i) {
+@@ -263,9 +286,17 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+         base_entry.offset = uniform_ring.Push(
+             std::span<const u8>(reinterpret_cast<const u8*>(bases.data()), sizeof(bases)));
+         base_entry.size = sizeof(bases);
++        if (rectangle) {
++            auto& index_entry = entries[count + 1];
++            index_entry.binding = Shader::Backend::WGSL::MAX_PULLED_BUFFERS + 1;
++            index_entry.buffer = indexed ? runtime.index.buffer : uniform_ring.Buffer();
++            index_entry.offset = indexed ? runtime.index.offset : 0;
++            index_entry.size = indexed ? runtime.index.size : 4;
++            read_buffers.push_back(index_entry.buffer.Get());
++        }
+         wgpu::BindGroupDescriptor desc{};
+         desc.layout = pipeline->pulled_layout;
+-        desc.entryCount = count + 1;
++        desc.entryCount = count + 1 + (rectangle ? 1 : 0);
+         desc.entries = entries.data();
+         pulled_group = Thread::Get().device.CreateBindGroup(&desc);
+     }
+@@ -415,7 +446,12 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+                                   regs.blend_color.a};
+     pass.SetBlendConstant(&blend_color);
+     pass.SetStencilReference(regs.stencil_front_ref & 0xFF);
+-    if (indexed) {
++    if (rectangle) {
++        if (count / 3 > std::numeric_limits<u32>::max() / 6) {
++            return;
++        }
++        pass.Draw(count / 3 * 6, instance_count, first, draw_state.base_instance);
++    } else if (indexed) {
+         const auto& index = runtime.index;
+         if (!index.buffer) {
+             return;
