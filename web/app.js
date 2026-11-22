@@ -683,7 +683,7 @@ async function resetEmulation() {
     btnReset.title = err.message;
   } finally {
     resetting = false;
-    btnReset.disabled = !(isRunning || isPaused);
+    btnReset.disabled = !(isRunning || isPaused || crashed);
   }
 }
 

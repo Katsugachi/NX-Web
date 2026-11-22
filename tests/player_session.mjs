@@ -74,6 +74,26 @@ await stash.stashGameFile(new File(['different ROM'], 'hello.nro'), true);
 assert.equal(writes, 1, 'a different file with the same name must still replace the stash');
 assert.equal(await storedBlob.text(), 'different ROM');
 
+const resetSource = appSource.slice(appSource.indexOf('async function resetEmulation('), appSource.indexOf('\nconst ROM_EXTENSIONS'));
+for (const failed of ['stash', 'preserve', 'mark']) {
+  const button = {};
+  const reset = runInNewContext(`${resetSource}; resetEmulation;`, {
+    resetting: false, isRunning: false, isPaused: false, crashed: true,
+    btnReset: button, lastGameFile: file, rebootGame, RESUME_KEY: 'eden-resume',
+    stashGameFile: async () => { if (failed === 'stash') throw new Error('storage blocked'); },
+    stopSaveWatch: async () => {}, watchSaves: () => async () => {},
+    persistSaves: async () => { if (failed === 'preserve') throw new Error('storage blocked'); },
+    edenModule: { FS: {} }, showSavePoint() {},
+    sessionStorage: { removeItem() {}, setItem() { throw new Error('storage blocked'); } },
+    log() {}, setRomStatus() {},
+  });
+  await reset();
+  assert.equal(button.textContent, 'Reset failed — retry');
+  assert.equal(button.disabled, false, `a crashed game can retry after ${failed} fails`);
+  await reset();
+  assert.equal(button.disabled, false, 'a repeated failure must keep retry available');
+}
+
 let captures = 0;
 let stops = 0;
 const stream = { getTracks: () => [{ stop: () => stops++ }] };
