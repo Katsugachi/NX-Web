@@ -65,6 +65,7 @@ function selectTab(id, focus = false) {
     $(`tab-${key}`).tabIndex = selected ? 0 : -1;
     $(`panel-${key}`).hidden = !selected;
   }
+  $('settings-panels').scrollTop = 0;
   if (focus) $(`tab-${id}`).focus();
 }
 for (const [id, label, widgets] of sections) {
@@ -89,7 +90,7 @@ function note(parent, text) {
   const element = document.createElement('p'); element.className = 'privacy-note'; element.textContent = text; $(parent).prepend(element);
 }
 note('system-files-card', 'Supply your own keys and firmware dumped from your own console. NX-Web does not include or download them. Most homebrew needs neither. Files stay in this browser.');
-note('save-state-card', 'Slots copy in-game save files, not emulator save states. Select a slot in the player bar. Loading restarts the game. Export important saves as backups.');
+note('save-state-card', 'Slots copy in-game save files, not emulator save states. Choose a slot here or in the player bar. Loading restarts the game. Export important saves as backups.');
 function releaseInput() { window.dispatchEvent(new Event('nx-release-input')); }
 function openSettings() { releaseInput(); if (shortcuts.open) shortcuts.close(); if (!drawer.open) drawer.showModal(); }
 function openShortcuts() { releaseInput(); renderShortcuts(); if (drawer.open) drawer.close(); if (!shortcuts.open) shortcuts.showModal(); }
@@ -195,6 +196,35 @@ for (const [id, name, label] of [['btn-save-state','save','Save slot'],['btn-loa
   $(id).className = 'icon-button'; $(id).innerHTML = icon(name); $(id).setAttribute('aria-label', label);
 }
 $('save-state-slot').setAttribute('aria-label', 'Save slot');
+// Keep the engine's original select in the toolbar and mirror it in the drawer.
+const drawerSlot = document.createElement('select');
+drawerSlot.id = 'drawer-save-slot'; drawerSlot.className = 'renderer-select';
+drawerSlot.setAttribute('aria-label', 'Save slot');
+const drawerSlotLabel = document.createElement('label');
+drawerSlotLabel.htmlFor = drawerSlot.id; drawerSlotLabel.className = 'mode-help field-label';
+drawerSlotLabel.textContent = 'Selected slot';
+document.querySelector('#save-state-card .save-toolbar').replaceWith(drawerSlotLabel, drawerSlot);
+const drawerSlotActions = document.createElement('div'); drawerSlotActions.className = 'core-actions';
+drawerSlot.after(drawerSlotActions);
+for (const [id, label] of [['btn-save-state', 'Save to slot'], ['btn-load-slot', 'Load slot']]) {
+  const source = $(id); const button = document.createElement('button');
+  button.className = 'btn'; button.textContent = label;
+  const syncAction = () => { button.disabled = source.disabled; button.title = source.title; };
+  new MutationObserver(syncAction).observe(source, { attributes:true, attributeFilter:['disabled','title'] });
+  button.addEventListener('click', () => source.click());
+  syncAction(); drawerSlotActions.append(button);
+}
+function syncSlot() {
+  drawerSlot.replaceChildren(...[...$('save-state-slot').options].map(option => option.cloneNode(true)));
+  drawerSlot.value = $('save-state-slot').value;
+}
+new MutationObserver(syncSlot).observe($('save-state-slot'), { childList:true, subtree:true, characterData:true });
+$('save-state-slot').addEventListener('change', syncSlot);
+drawerSlot.addEventListener('change', () => {
+  $('save-state-slot').value = drawerSlot.value;
+  $('save-state-slot').dispatchEvent(new Event('change', { bubbles:true }));
+});
+syncSlot();
 $('canvas').tabIndex = 0;
 $('show-joycons').closest('label').hidden = true;
 document.querySelectorAll('.joycon').forEach(node => node.remove());
@@ -232,14 +262,20 @@ new MutationObserver(updateState).observe($('wasm-state'), { childList:true, sub
 new MutationObserver(updateState).observe($('rom-status'), { childList:true, subtree:true });
 let barTimer;
 function showBar() {
-  document.body.classList.remove('bar-hidden'); clearTimeout(barTimer);
+  document.body.classList.remove('bar-hidden'); $('player-toolbar').inert = false; clearTimeout(barTimer);
   if ($('wasm-state').textContent === 'Running') barTimer = setTimeout(() => {
-    if (!drawer.open && !shortcuts.open && !leave.open && !$('player-toolbar').contains(document.activeElement)) document.body.classList.add('bar-hidden');
+    const toolbar = $('player-toolbar');
+    if (!drawer.open && !shortcuts.open && !leave.open && !toolbar.matches(':hover') && !toolbar.contains(document.activeElement)) {
+      document.body.classList.add('bar-hidden'); toolbar.inert = true;
+    }
   }, 2000);
 }
 $('player').addEventListener('pointermove', showBar);
 $('player').addEventListener('touchstart', showBar, { passive:true });
 $('player-toolbar').addEventListener('focusin', showBar);
+$('player-toolbar').addEventListener('focusout', showBar);
+$('player-toolbar').addEventListener('pointerleave', showBar);
+document.addEventListener('fullscreenchange', showBar);
 $('player-toolbar').addEventListener('click', event => { if (event.target.tagName !== 'SELECT' && !drawer.open) $('canvas').focus(); });
 for (const dialog of [drawer, shortcuts, leave]) dialog.addEventListener('close', () => {
   if (!$('player').hidden && !drawer.open && !shortcuts.open && !leave.open) { $('canvas').focus(); showBar(); }
