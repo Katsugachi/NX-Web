@@ -57,6 +57,7 @@ console.log('save archives OK');
 let snapshot = new Map();
 const slots = new Map();
 let aborts = 0;
+let transactions = 0;
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const originalIndexedDB = globalThis.indexedDB;
 const originalSetInterval = globalThis.setInterval;
@@ -71,6 +72,7 @@ globalThis.indexedDB = {
       request.result = {
         close() {},
         transaction(name) {
+          transactions++;
           const source = name === 'slots' ? slots : snapshot;
           const pending = new Map(source);
           let aborted = false;
@@ -198,7 +200,9 @@ try {
   await settle();
   assert.equal(snapshot.has('sdmc/nxweb-save-test.txt'), false);
   lifecycle.document.visibilityState = 'hidden';
+  const beforeHidden = transactions;
   lifecycle.document.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(transactions, beforeHidden + 1, 'hidden flush must start its transaction before the event returns');
   await settle();
   assert.deepEqual(new Uint8Array(await snapshot.get('sdmc/nxweb-save-test.txt').arrayBuffer()), new Uint8Array([50]));
   sdContents.set('nxweb-save-test.txt', new Uint8Array([51]));

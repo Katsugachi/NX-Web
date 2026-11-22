@@ -34,8 +34,8 @@ function openDb() {
   });
 }
 
-async function withStore(name, mode, fn) {
-  const db = await openDb();
+async function withStore(name, mode, fn, connection) {
+  const db = connection ?? await openDb();
   let tx;
   try {
     tx = db.transaction(name, mode);
@@ -50,7 +50,7 @@ async function withStore(name, mode, fn) {
     try { tx?.abort(); } catch {}
     throw err;
   } finally {
-    db.close();
+    if (!connection) db.close();
   }
 }
 
@@ -102,7 +102,7 @@ export async function restoreSaves(FS) {
   return count;
 }
 
-async function storeSaves(FS, files) {
+async function storeSaves(FS, files, connection) {
   const meta = { time: Date.now(), files: files.length, bytes: 0 };
   await withStore(SAVES, 'readwrite', store => {
     store.clear();
@@ -112,7 +112,7 @@ async function storeSaves(FS, files) {
       store.put(new Blob([data]), path);
     }
     store.put(meta, META_KEY);
-  });
+  }, connection);
   return meta;
 }
 
@@ -258,6 +258,10 @@ export async function clearSlot(slot) {
 /// Polls the save folders while `healthy()` holds and stores a save point once a change has
 /// settled. Returns a function that stops watching.
 export function watchSaves(getFS, healthy, onSaved, intervalMs = 10_000, lifecycle = globalThis) {
+  let connection;
+  const ready = openDb().then(db => { connection = db; }).catch(err => {
+    console.warn('Save database failed:', err);
+  });
   const initialFS = getFS();
   let stored = initialFS ? signature(listSaveFiles(initialFS)) : null;
   let pending = null;
@@ -273,7 +277,7 @@ export function watchSaves(getFS, healthy, onSaved, intervalMs = 10_000, lifecyc
         const files = listSaveFiles(FS);
         const sig = signature(files);
         if (immediate || (sig !== stored && sig === pending)) {
-          onSaved(await storeSaves(FS, files));
+          onSaved(await storeSaves(FS, files, connection));
           stored = sig;
         } else if (stored === null) {
           // The first poll after boot only records what was restored.
@@ -293,12 +297,14 @@ export function watchSaves(getFS, healthy, onSaved, intervalMs = 10_000, lifecyc
   lifecycle.document?.addEventListener('visibilitychange', onHidden);
   lifecycle.addEventListener?.('pagehide', onPageHide);
   const timer = setInterval(() => flush(), intervalMs);
-  return () => {
+  return async () => {
     active = false;
     clearInterval(timer);
     lifecycle.document?.removeEventListener('visibilitychange', onHidden);
     lifecycle.removeEventListener?.('pagehide', onPageHide);
-    return busy ?? Promise.resolve();
+    await busy;
+    await ready;
+    connection?.close();
   };
 }
 
