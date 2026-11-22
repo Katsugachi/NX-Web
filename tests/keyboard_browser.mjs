@@ -40,6 +40,7 @@ try {
         assert.deepEqual(shortcuts['Stage fullscreen'], ['Alt+Enter']);
         assert.deepEqual(shortcuts['Picture-in-picture'], ['Alt+P']);
         assert.deepEqual(shortcuts['Toggle speed limit'], ['Alt+U']);
+        await page.evaluate(() => { window.showOpenFilePicker = undefined; });
         await page.$eval('#file-input', input => input.addEventListener('click', event => {
           event.preventDefault();
           input.dataset.opened = 'true';
