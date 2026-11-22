@@ -33,6 +33,30 @@ import {
 } from './recovery.js';
 import { setupCompatibility } from './compat.js';
 import { setupDiagnostics } from './diagnostics.js';
+import { acquireSession } from './session-lock.js';
+
+let sessionOwned = false;
+const sessionNotice = document.createElement('section');
+sessionNotice.id = 'session-lock';
+sessionNotice.setAttribute('role', 'status');
+sessionNotice.setAttribute('aria-live', 'polite');
+document.body.append(sessionNotice);
+const sessionReady = acquireSession(status => {
+  sessionOwned = status === 'acquired';
+  document.getElementById('nx-app').inert = !sessionOwned;
+  sessionNotice.hidden = sessionOwned;
+  sessionNotice.textContent = status === 'blocked'
+    ? 'NX-Web is already open in another tab. Saves can only be used in one tab at a time, so close the other tab to play here.'
+    : status === 'error'
+      ? 'NX-Web could not secure this session. Reload the page to try again before playing.'
+      : 'Checking whether NX-Web is open in another tab…';
+});
+document.addEventListener('keydown', event => {
+  if (!sessionOwned) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+}, true);
 
 // DOM Elements
 const canvas = document.getElementById('canvas');
@@ -426,6 +450,7 @@ function initWasmCore() {
 }
 
 async function initWasmCoreOnce() {
+  if (!await sessionReady) return;
   checkIsolation();
   await loadRuntimeScript();
   await inspectWasmBinary();
@@ -673,6 +698,7 @@ async function hasNroHeader(file) {
 
 // Handle dropped or selected ROM file, or an archive holding one
 async function handleFile(file) {
+  if (!sessionOwned) return;
   if (!file) return;
   if (loadingRom || isRomLoaded) {
     log('ROM selection ignored: a game is already loading or loaded.', 'ui');
@@ -1481,4 +1507,6 @@ inspectGpu();
 showVersion();
 
 // Initial boot (module scripts are deferred, so the DOM is already parsed)
-initWasmCore().then(resumeAfterCrash);
+sessionReady.then(acquired => {
+  if (acquired) initWasmCore().then(resumeAfterCrash);
+});
