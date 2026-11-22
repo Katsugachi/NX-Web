@@ -44,6 +44,7 @@ export function setupTouchscreen(canvas, getModule) {
     const slot = Array.from({ length: 16 }, (_, i) => i).find(i => !used.has(i));
     if (slot === undefined) return;
     event.preventDefault();
+    if (document.activeElement !== canvas) document.activeElement?.blur?.();
     canvas.setPointerCapture(event.pointerId);
     contacts.set(event.pointerId, { slot, module });
     module._eden_set_touch(slot, ...point, 1);
