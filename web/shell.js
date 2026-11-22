@@ -43,7 +43,7 @@ shell.innerHTML = `
     <div class="drawer-heading"><h2 id="settings-title">Settings</h2><button id="close-settings" class="icon-button" aria-label="Close settings">${icon('close')}</button></div>
     <div role="tablist" aria-label="Settings sections" id="settings-tabs"></div><div id="settings-panels"></div>
   </dialog>
-  <dialog id="shortcuts-dialog" aria-labelledby="shortcuts-title"><div class="drawer-heading"><div><h2 id="shortcuts-title">Stay in control.</h2><p>Your keyboard is the controller.</p></div><button id="close-shortcuts" class="icon-button" aria-label="Close shortcuts">${icon('close')}</button></div><div id="shortcuts-columns"></div><p class="shortcut-footnote">Change any mapping in Settings → Controls. Gamepads connect automatically.</p></dialog>`;
+  <dialog id="shortcuts-dialog" aria-labelledby="shortcuts-title"><div class="drawer-heading"><div><h2 id="shortcuts-title">Stay in control.</h2><p>Your keyboard is the controller.</p></div><button id="close-shortcuts" class="icon-button" aria-label="Close shortcuts">${icon('close')}</button></div><div id="shortcuts-columns"></div><p class="shortcut-footnote">Change mappings in Settings → Controls. Alt shortcuts are fixed. Gamepads connect automatically.</p></dialog>`;
 document.body.append(shell);
 
 const drawer = $('settings-drawer');
@@ -155,11 +155,17 @@ function renderShortcuts() {
       ['L / R', ['l','r']], ['ZL / ZR', ['zl','zr']],
       ['Plus / Minus', ['plus','minus']], ['L3 / R3', ['l3','r3']], ['Home', ['home']],
     ];
-    for (const [name, ids] of rows) {
+    const shortcuts = rows.map(([name, ids]) => [name, ids.map(id => keyLabel(bindings[id]))]);
+    if (hotkey) shortcuts.push(
+      ['Stage fullscreen', ['Alt+Enter']],
+      ['Picture-in-picture', ['Alt+P']],
+      ['Toggle speed limit', ['Alt+U']],
+    );
+    for (const [name, labels] of shortcuts) {
       const row = document.createElement('div'); row.className = 'cheat-row';
       const label = document.createElement('span'); label.textContent = name;
       const keys = document.createElement('span'); keys.className = 'cheat-keys';
-      for (const id of ids) { const key = document.createElement('kbd'); key.textContent = keyLabel(bindings[id]); keys.append(key); }
+      for (const label of labels) { const key = document.createElement('kbd'); key.textContent = label; keys.append(key); }
       row.append(label, keys); column.append(row);
     }
     $('shortcuts-columns').append(column);
