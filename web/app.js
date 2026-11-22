@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import {
+  EDEN_DATA_ROOT,
   importSystemFile,
   getSystemFileStatus,
   clearSystemFiles,
@@ -10,7 +11,7 @@ import {
 import { setupInput } from './input.js';
 import { mountRom } from './rom-file.js';
 import { mountBrowserRom } from './browser-rom.js';
-import { bundledSdFiles, mountBundledSdFiles } from './homebrew-bundle.js';
+import { bundledSdFiles, homebrewRomPath, mountBundledSdFiles } from './homebrew-bundle.js';
 import { setupAudio } from './audio.js';
 import { setupCamera } from './camera.js';
 import { createFrameWatchdog } from './frame-watchdog.js';
@@ -710,7 +711,7 @@ async function findRomInArchive(file) {
       if (roms.length === 0) return null;
       if (roms[0].supported) {
         if (roms.length > 1) log(`${file.name} holds ${roms.length} ROMs; loading ${roms[0].name}.`, 'ui');
-        return { ...roms[0], name: baseName(roms[0].name), sdFiles: bundledSdFiles(entries, roms) };
+        return { ...roms[0], name: baseName(roms[0].name), romPath: homebrewRomPath(roms[0].name), sdFiles: bundledSdFiles(entries, roms) };
       }
     }
   }
@@ -719,12 +720,12 @@ async function findRomInArchive(file) {
   const stored = await storedRomSlice(file, rom).catch(() => null);
   if (stored) {
     log(`${file.name}: ${baseName(rom.name)} is stored uncompressed; reading it in place.`, 'ui');
-    return { name: baseName(rom.name), size: rom.size, file: stored, stream: async () => stored.stream() };
+    return { name: baseName(rom.name), romPath: homebrewRomPath(rom.name), size: rom.size, file: stored, stream: async () => stored.stream() };
   }
   // The check may have read from the decoder, so start it again.
   rom.cancel?.();
   const { rom: decoded } = await openArchive(file, { romExtensions: ARCHIVED_ROM_EXTENSIONS, systemExtensions: [] });
-  return decoded ? { ...decoded, name: baseName(decoded.name) } : null;
+  return decoded ? { ...decoded, name: baseName(decoded.name), romPath: homebrewRomPath(decoded.name) } : null;
 }
 
 async function hasNroHeader(file) {
@@ -835,23 +836,27 @@ async function loadFile(file) {
       if (rom.sdFiles?.length) {
         setRomStatus('Mounting bundled homebrew assets...');
         bundle = await mountBundledSdFiles(edenModule.FS, rom.sdFiles);
-        trackBundledSdFiles(edenModule.FS, bundle.installed);
         log(`Mounted ${bundle.installed.length} bundled SD card files.`, 'ui');
       }
 
       wasmStatusText.textContent = `Reading ${rom.name}...`;
       setRomStatus(`Reading ${rom.name}...`);
-      const path = '/roms/' + rom.name;
-      edenModule.FS.mkdirTree('/roms');
+      const isNro = /\.nro$/i.test(rom.name);
+      const path = rom.romPath ?? homebrewRomPath(rom.name);
+      edenModule.FS.mkdirTree(path.slice(0, path.lastIndexOf('/')));
       loader.setPhase('copy');
       diagnostics.stage('copy');
       let copied;
-      if (edenModule._eden_register_browser_rom && (rom.file || navigator.storage?.getDirectory)) {
+      if (!isNro && edenModule._eden_register_browser_rom && (rom.file || navigator.storage?.getDirectory)) {
         browserRom = await mountBrowserRom(edenModule, path, rom, bytes => { loader.bytes = bytes; });
         copied = browserRom.bytes;
       } else {
         copied = await mountRom(edenModule.FS, path, rom, bytes => { loader.bytes = bytes; });
       }
+      trackBundledSdFiles(edenModule.FS, [
+        ...(bundle?.installed ?? []),
+        ...(isNro ? [path.slice(EDEN_DATA_ROOT.length + 1)] : []),
+      ]);
       log(`Mounted ${rom.name}: ${copied} bytes in ${((performance.now() - loader.copyStart) / 1000).toFixed(1)} s.`, 'ui');
       loader.setPhase('boot');
       diagnostics.stage('boot');

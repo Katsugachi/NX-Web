@@ -196,9 +196,11 @@ try {
   await restoreSaves({ mkdirTree() {}, writeFile: (path, data) => sdRestored.set(path, data) });
   assert.deepEqual(sdRestored.get(`${EDEN_DATA_ROOT}/sdmc/nxweb-save-test.txt`), new Uint8Array([49]));
   sdContents.set('asset.dat', new Uint8Array([20]));
-  trackBundledSdFiles(FS, ['sdmc/asset.dat']);
+  sdContents.set('app.nro', new Uint8Array([78, 82, 79, 48]));
+  trackBundledSdFiles(FS, ['sdmc/asset.dat', 'sdmc/app.nro']);
   await persistSaves(FS);
   assert.equal(snapshot.has('sdmc/asset.dat'), false);
+  assert.equal(snapshot.has('sdmc/app.nro'), false);
   sdContents.set('asset.dat', new Uint8Array([20, 21]));
   await persistSaves(FS);
   assert.equal(snapshot.has('sdmc/asset.dat'), true);

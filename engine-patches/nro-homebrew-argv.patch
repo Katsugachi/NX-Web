@@ -1,0 +1,125 @@
+diff --git a/src/core/loader/nro.cpp b/src/core/loader/nro.cpp
+index 4ba4bde0bb..c3a8c8977d 100644
+--- a/src/core/loader/nro.cpp
++++ b/src/core/loader/nro.cpp
+@@ -29,6 +29,7 @@
+ #include "core/hle/kernel/k_thread.h"
+ #include "core/hle/service/filesystem/filesystem.h"
+ #include "core/loader/nro.h"
++#include "core/loader/nro_path.h"
+ #include "core/memory.h"
+ 
+ #ifdef HAS_NCE
+@@ -153,7 +154,7 @@ static constexpr u32 PageAlignSize(u32 size) {
+ }
+ 
+ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
+-                        const std::vector<u8>& data) {
++                        const std::vector<u8>& data, std::string_view path) {
+     if (data.size() < sizeof(NroHeader)) {
+         return {};
+     }
+@@ -205,15 +206,10 @@ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
+     constexpr u32 kSvcExitProcessInstruction = 0xD40000E1;
+     constexpr size_t kNumEntries = 4; // MainThreadHandle, AppletType, Argv, EndOfList
+     constexpr size_t kConfigTableSize = kNumEntries * sizeof(ConfigEntry);
+-    std::string argv_string;
++    const std::string argv_string = NroArgv(path, Settings::values.program_args.GetValue());
+     size_t args_offset_in_image = 0;
+     std::optional<size_t> exit_process_offset_in_image;
+-    const auto& program_args = Settings::values.program_args.GetValue();
+-    if (!program_args.empty()) {
+-        argv_string = "homebrew ";
+-        argv_string += program_args;
+-        argv_string.push_back('\0');
+-
++    {
+         const auto& code = codeset.CodeSegment();
+         const size_t code_end = (std::min)(program_image.size(), code.offset + code.size);
+         for (size_t offset = code.offset; offset + sizeof(u32) <= code_end; offset += sizeof(u32)) {
+@@ -297,7 +293,7 @@ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
+     // Load codeset for current process
+     codeset.memory = std::move(program_image);
+     process.LoadModule(system.Kernel(), std::move(codeset), process.GetEntryPoint());
+-    if (!argv_string.empty()) {
++    {
+         constexpr u32 kEntryEndOfList = 0;
+         constexpr u32 kEntryMainThreadHandle = 1;
+         constexpr u32 kEntryArgv = 5;
+@@ -329,7 +325,7 @@ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
+ 
+ bool AppLoader_NRO::LoadNro(Core::System& system, Kernel::KProcess& process,
+                             const FileSys::VfsFile& nro_file) {
+-    return LoadNroImpl(system, process, nro_file.ReadAllBytes());
++    return LoadNroImpl(system, process, nro_file.ReadAllBytes(), nro_file.GetFullPath());
+ }
+ 
+ AppLoader_NRO::LoadResult AppLoader_NRO::Load(Kernel::KProcess& process, Core::System& system) {
+diff --git a/src/yuzu_cmd/emscripten_rom.cpp b/src/yuzu_cmd/emscripten_rom.cpp
+index cd32cb79c9..a43a8c64f9 100644
+--- a/src/yuzu_cmd/emscripten_rom.cpp
++++ b/src/yuzu_cmd/emscripten_rom.cpp
+@@ -36,10 +36,13 @@ bool io_failed = false;
+ class BrowserRomFile final : public FileSys::VfsFile {
+ public:
+     BrowserRomFile(std::string path, size_t size_)
+-        : name{std::filesystem::path{path}.filename().string()}, size{size_} {}
++        : name{std::filesystem::path{path}.filename().string()}, full_path{std::move(path)}, size{size_} {}
+     std::string GetName() const override {
+         return name;
+     }
++    std::string GetFullPath() const override {
++        return full_path;
++    }
+     size_t GetSize() const override {
+         return size;
+     }
+@@ -102,6 +105,7 @@ public:
+ 
+ private:
+     std::string name;
++    std::string full_path;
+     size_t size;
+ };
+ 
+diff --git a/src/core/loader/nro_path.h b/src/core/loader/nro_path.h
+new file mode 100644
+index 0000000000..a8ad416788
+--- /dev/null
++++ b/src/core/loader/nro_path.h
+@@ -0,0 +1,35 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++
++#include <string>
++#include <string_view>
++
++namespace Loader {
++
++inline std::string NroSdPath(std::string_view path) {
++    if (path.starts_with("sdmc:/")) {
++        return std::string{path};
++    }
++    if (const auto sdmc = path.find("/sdmc/"); sdmc != std::string_view::npos) {
++        return "sdmc:/" + std::string{path.substr(sdmc + 6)};
++    }
++    if (path.starts_with("/roms/switch/")) {
++        return "sdmc:/" + std::string{path.substr(6)};
++    }
++    const auto filename = path.substr(path.find_last_of("/\\") + 1);
++    const auto extension = filename.find_last_of('.');
++    return "sdmc:/switch/" + std::string{filename.substr(0, extension)} + "/" +
++           std::string{filename};
++}
++
++inline std::string NroArgv(std::string_view path, std::string_view arguments) {
++    std::string argv = "\"" + NroSdPath(path) + "\"";
++    if (!arguments.empty()) {
++        argv += ' ';
++        argv += arguments;
++    }
++    argv.push_back('\0');
++    return argv;
++}
++
++} // namespace Loader
