@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { runPreflight } from './diagnostics.js';
 import { recentGames, rememberGame, compatibilityProblems, runtimeProblem } from './shell-model.js';
-import { ACTIONS, DEFAULT_BINDINGS, bindingKey, keyLabel, readBindings, rebind, writeBindings } from './bindings.js';
+import { ACTIONS, DEFAULT_BINDINGS, bindingKey, keyLabel, readBindings, rebind, usesNativeKeys, writeBindings } from './bindings.js';
 
 const $ = id => document.getElementById(id);
 const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${{
@@ -103,33 +103,41 @@ for (const dialog of [drawer, shortcuts]) dialog.addEventListener('click', event
 
 let bindings = readBindings();
 let rebinding = null;
+const bindingButtons = new Map();
 const bindingsCard = document.createElement('div'); bindingsCard.className = 'card';
 bindingsCard.innerHTML = '<div class="bindings-heading"><h2>Keyboard</h2><button id="reset-bindings" class="text-button">Reset to defaults</button></div><p class="mode-help">Click a key to rebind it. Press Escape to cancel.</p><p id="binding-status" role="status" class="mode-help"></p><div id="binding-list"></div>';
 $('panel-controls').prepend(bindingsCard);
-function renderBindings() {
-  $('binding-list').replaceChildren();
+function buildBindings() {
   for (const hotkey of [false, true]) {
     const heading = document.createElement('h3'); heading.textContent = hotkey ? 'Emulator' : 'Controller'; $('binding-list').append(heading);
     for (const action of ACTIONS.filter(action => Boolean(action.hotkey) === hotkey)) {
       const row = document.createElement('div'); row.className = 'binding-row';
       const label = document.createElement('span'); label.textContent = action.label;
       const button = document.createElement('button'); button.className = 'key-binding'; button.dataset.binding = action.id;
-      button.textContent = keyLabel(bindings[action.id]); button.setAttribute('aria-label', `Rebind ${action.label}: ${button.textContent}`);
+      bindingButtons.set(action.id, button);
       button.addEventListener('click', () => {
         releaseInput(); rebinding = action.id;
-        document.querySelectorAll('.key-binding').forEach(element => element.classList.remove('listening'));
-        button.classList.add('listening'); button.textContent = 'Press a key…';
+        renderBindings();
         $('binding-status').textContent = `New key for ${action.label}. Escape cancels.`;
       });
       row.append(label, button); $('binding-list').append(row);
     }
+  }
+}
+function renderBindings() {
+  for (const action of ACTIONS) {
+    const button = bindingButtons.get(action.id);
+    const listening = rebinding === action.id;
+    button.classList.toggle('listening', listening);
+    button.textContent = listening ? 'Press a key…' : keyLabel(bindings[action.id]);
+    button.setAttribute('aria-label', `Rebind ${action.label}: ${button.textContent}`);
   }
   refreshHints();
 }
 function refreshHints() {
   const prompt = document.querySelector('#drop-zone .drop-prompt p');
   if (prompt) { const key = document.createElement('kbd'); key.textContent = keyLabel(bindings.open); prompt.replaceChildren('or press ',key,' to open'); }
-  $('shortcut-hint').textContent = `Press ${keyLabel(bindings.shortcuts)} for shortcuts`;
+  $('shortcut-hint').querySelector('kbd').textContent = keyLabel(bindings.shortcuts);
   for (const [id, action, label] of [['toggle-pause','pause','Pause / Resume'],['btn-save-state','save','Save slot'],['btn-load-slot','load','Load slot'],['player-fullscreen','fullscreen','Fullscreen'],['player-settings','settings','Settings'],['library-settings','settings','Settings']]) {
     $(id).title = `${label} (${keyLabel(bindings[action])})`;
   }
@@ -161,7 +169,8 @@ $('reset-bindings').addEventListener('click', () => {
   bindings = { ...DEFAULT_BINDINGS }; rebinding = null;
   const stored = writeBindings(bindings); renderBindings(); $('binding-status').textContent = stored ? 'Default mappings restored.' : 'Defaults restored for this session. Browser storage is unavailable.';
 });
-drawer.addEventListener('close', () => { rebinding = null; renderBindings(); });
+drawer.addEventListener('close', () => { rebinding = null; renderBindings(); $('binding-status').textContent = ''; });
+buildBindings();
 renderBindings();
 
 $('library-drop').append($('drop-zone'));
@@ -173,8 +182,8 @@ const formats = document.createElement('span'); formats.className = 'formats'; f
 $('launch-status').append($('rom-status')); $('rom-status').textContent = '';
 $('player-stage').append($('screen-stage')); $('player-title').append($('title-name')); $('player-fps').append($('fps-counter'));
 for (const id of ['save-state-slot', 'btn-save-state', 'btn-load-slot']) $('toolbar-slot').append($(id));
-for (const [id, name, label] of [['btn-save-state','save','Save slot (F5)'],['btn-load-slot','load','Load slot (F8)']]) {
-  $(id).className = 'icon-button'; $(id).innerHTML = icon(name); $(id).setAttribute('aria-label', label); $(id).title = label;
+for (const [id, name, label] of [['btn-save-state','save','Save slot'],['btn-load-slot','load','Load slot']]) {
+  $(id).className = 'icon-button'; $(id).innerHTML = icon(name); $(id).setAttribute('aria-label', label);
 }
 $('save-state-slot').setAttribute('aria-label', 'Save slot');
 $('canvas').tabIndex = 0;
@@ -220,7 +229,9 @@ $('player').addEventListener('pointermove', showBar);
 $('player').addEventListener('touchstart', showBar, { passive:true });
 $('player-toolbar').addEventListener('focusin', showBar);
 $('player-toolbar').addEventListener('click', event => { if (event.target.tagName !== 'SELECT' && !drawer.open) $('canvas').focus(); });
-for (const dialog of [drawer, shortcuts]) dialog.addEventListener('close', () => { $('canvas').focus(); showBar(); });
+for (const dialog of [drawer, shortcuts]) dialog.addEventListener('close', () => {
+  if (!$('player').hidden && !drawer.open && !shortcuts.open) { $('canvas').focus(); showBar(); }
+});
 function hotkey(action) {
   const playing = !$('player').hidden;
   if (action === 'open' && !playing) $('file-input').click();
@@ -232,7 +243,7 @@ function hotkey(action) {
 window.addEventListener('keydown', event => {
   if (rebinding) {
     event.preventDefault(); event.stopImmediatePropagation();
-    if (event.repeat) return;
+    if (event.repeat || event.key === 'Shift') return;
     if (event.code === 'Escape') { rebinding = null; renderBindings(); $('binding-status').textContent = 'Rebinding cancelled.'; return; }
     try {
       if (event.ctrlKey || event.altKey || event.metaKey) throw new Error('Choose a single key, optionally with Shift.');
@@ -243,13 +254,16 @@ window.addEventListener('keydown', event => {
     return;
   }
   if (event.altKey || event.ctrlKey || event.metaKey || event.defaultPrevented) return;
-  const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName) || event.target.isContentEditable;
-  const action = ACTIONS.find(action => action.hotkey && bindings[action.id] === bindingKey(event) && (action.id !== 'open' || !$('library').hidden));
-  if (!action || (typing && !['bar','settings'].includes(action.id))) return;
-  if (drawer.open && !['bar','settings','shortcuts'].includes(action.id)) return;
-  if (action.id === 'settings' && drawer.open && event.code === 'Tab') return;
+  const modalOpen = drawer.open || shortcuts.open;
+  if (modalOpen && event.code === 'Tab') return;
+  if ($('settings-tabs').contains(event.target) && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  if (usesNativeKeys(event)) return;
+  const action = ACTIONS.find(action => action.hotkey && bindings[action.id] === bindingKey(event));
+  if (!action) return;
+  if (action.id === 'open' ? modalOpen || $('library').hidden
+    : !['bar', 'settings', 'shortcuts'].includes(action.id) && (modalOpen || $('player').hidden)) return;
   event.preventDefault(); event.stopImmediatePropagation();
-  if (!event.repeat) { releaseInput(); hotkey(action.id); }
+  if (!event.repeat) hotkey(action.id);
 }, true);
 
 let recent = [];

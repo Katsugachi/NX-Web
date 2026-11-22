@@ -94,9 +94,10 @@ automatically (press a controller button to expose it to the browser).
 | Show bar / close drawer | Esc |
 | Shortcuts | ? |
 
-Tab keeps its normal focus-navigation behavior inside the settings drawer. Escape
-also retains the browser's native close-dialog behavior. Keyboard game input is
-released on blur, rebinding and opening a dialog so buttons cannot remain stuck.
+Tab keeps its normal focus-navigation behavior inside dialogs. Escape also retains
+the browser's native close-dialog behavior. Keyboard game input is released on
+blur, rebinding, opening a dialog or focusing a form field so buttons cannot
+remain stuck. Home is a system button, not an in-game controller input.
 
 Settings contains controls/gamepads, system-file import, graphics filtering and
 fit, JIT/interpreter selection, speed limit, audio, saves and diagnostics. Changing
