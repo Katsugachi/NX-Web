@@ -11,7 +11,7 @@ index 3c645eb845..07bb52292a 100644
      std::vector<TextureSampleKind> texture_kinds;
      /// Interpolation the next stage declares for each generic (vertex outputs must match).
 diff --git a/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp b/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
-index aa7565f1cc..ac5cb569b9 100644
+index aa7565f1cc..644fe1e06b 100644
 --- a/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
 +++ b/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
 @@ -113,11 +113,12 @@ std::string AttributeConversion(AttributeType type, std::string_view value) {
@@ -75,12 +75,23 @@ index aa7565f1cc..ac5cb569b9 100644
                  }
              }
              if (options.attribute_snorm_1010102[index]) {
-@@ -549,6 +572,74 @@ std::string EmitContext::Finish(const IR::Program& program) {
+@@ -549,6 +572,85 @@ std::string EmitContext::Finish(const IR::Program& program) {
              }
          }
          entry += "return output;\n}\n";
 +        if (options.fill_rectangle) {
 +            entry += R"(
++fn rect_read_index(index: u32) -> u32 {
++    let size = u32(draw_info.render_area.z);
++    let address = u32(draw_info.render_area.w) + index * size;
++    let shift = (address & 3u) * 8u;
++    var value = rect_indices[address / 4u] >> shift;
++    if (shift + size * 8u > 32u) {
++        value |= rect_indices[address / 4u + 1u] << (32u - shift);
++    }
++    if (size == 2u) { value &= 65535u; }
++    return value;
++}
 +fn rect_cross(a: vec2<f32>, b: vec2<f32>) -> f32 { return a.x*b.y - a.y*b.x; }
 +@vertex fn main(input: VSInput) -> VSOutput {
 +    let local = input.vertex_index - draw_info.padding;
@@ -90,7 +101,7 @@ index aa7565f1cc..ac5cb569b9 100644
 +    for (var k = 0u; k < 3u; k++) {
 +        var vertex = draw_info.padding + tri*3u + k;
 +        if (draw_info.render_area.z != 0.0) {
-+            vertex = rect_indices[vertex] + draw_info.base_vertex;
++            vertex = rect_read_index(vertex) + draw_info.base_vertex;
 +        }
 +        vertices[k] = rect_guest(input, vertex);
 +    }
@@ -179,7 +190,7 @@ index 76c46a1a84..928dc2a09a 100644
  inline wgpu::PrimitiveTopology Topology(Maxwell::PrimitiveTopology topology) {
      switch (topology) {
 diff --git a/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp b/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
-index 83bdb4d627..94022b7d6a 100644
+index 83bdb4d627..195c7ed903 100644
 --- a/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
 +++ b/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
 @@ -79,6 +79,32 @@ void ConvertIndices(Maxwell::PrimitiveTopology topology, std::span<const u32> in
@@ -225,16 +236,17 @@ index 83bdb4d627..94022b7d6a 100644
  
  StagingBufferMap BufferCacheRuntime::UploadStagingBuffer(size_t size) {
      StagingBufferMap map;
-@@ -208,7 +235,7 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
+@@ -208,7 +235,8 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
                                           u32 first, u32 count, const wgpu::Buffer& buffer,
                                           u32 offset, u32 size, DAddr cpu_addr) {
      const u32 index_size = IndexSize(index_format);
 -    const bool convert = NeedsConversion(topology) || index_size == 1;
-+    const bool convert = rectangle_draw || NeedsConversion(topology) || index_size == 1;
++    const bool convert = NeedsConversion(topology) || index_size == 1 ||
++                         (rectangle_draw && topology == PrimitiveTopology::TriangleStrip);
      if (!convert || cpu_addr == 0) {
          index.buffer = buffer;
          index.offset = offset;
-@@ -236,18 +263,25 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
+@@ -236,18 +264,25 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
              break;
          }
      }
@@ -264,7 +276,7 @@ index 83bdb4d627..94022b7d6a 100644
  }
  
  void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 first, u32 count) {
-@@ -255,18 +289,24 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
+@@ -255,18 +290,24 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
      for (u32 i = 0; i < count; ++i) {
          vertices[i] = first + i;
      }
@@ -430,7 +442,7 @@ index 5395885fc0..cb6cf006d7 100644
      wgpu::RenderPipeline render_pipeline;
      /// Layout of the pulled vertex buffer group, null when every buffer has a vertex slot.
 diff --git a/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp b/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
-index 270365eb7e..fed4ff4a15 100644
+index 270365eb7e..c25ae841e3 100644
 --- a/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
 +++ b/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
 @@ -1,6 +1,8 @@
@@ -473,28 +485,32 @@ index 270365eb7e..fed4ff4a15 100644
      if (indirect && needs_conversion) {
          // Rewritten index lists cannot follow parameters the GPU wrote.
          return;
-@@ -148,6 +164,9 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -148,6 +164,10 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
          count = runtime.index.count;
          first = 0;
      }
-+    if (rectangle && indexed && !runtime.index.converted) {
++    if (rectangle && indexed && !runtime.index.converted &&
++        (needs_conversion || draw_state.index_buffer.format == Maxwell::IndexFormat::UnsignedByte)) {
 +        return;
 +    }
      if (!indirect && (count == 0 || instance_count == 0)) {
          return;
      }
-@@ -174,6 +193,10 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -174,6 +194,13 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
      info.render_area = {width, height, 0.0f, 0.0f};
      info.base_vertex = static_cast<u32>(base_vertex);
      info.base_instance = draw_state.base_instance;
 +    if (rectangle) {
 +        info.padding = first;
-+        info.render_area[2] = indexed ? 1.0f : 0.0f;
++        if (indexed) {
++            info.render_area[2] = runtime.index.format == wgpu::IndexFormat::Uint16 ? 2.0f : 4.0f;
++            info.render_area[3] = static_cast<f32>(runtime.index.offset % 256);
++        }
 +    }
      const f32 reduce_z = regs.depth_mode == Maxwell::DepthMode::MinusOneToOne ? 1.0f : 0.0f;
      f32 min_depth = std::clamp(transform.translate_z - transform.scale_z * reduce_z, 0.0f, 1.0f);
      f32 max_depth = std::clamp(transform.translate_z + transform.scale_z, 0.0f, 1.0f);
-@@ -236,8 +259,8 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -236,8 +263,8 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
      // Vertex buffers past WebGPU's slots are read by the shader as storage buffers. Storage
      // bindings start at 256-byte aligned offsets; the shader adds the remainder.
      wgpu::BindGroup pulled_group;
@@ -505,7 +521,7 @@ index 270365eb7e..fed4ff4a15 100644
          std::array<u32, Shader::Backend::WGSL::MAX_PULLED_BUFFERS> bases{};
          const size_t count = pipeline->pulled_buffers.size();
          for (size_t i = 0; i < count; ++i) {
-@@ -263,9 +286,17 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -263,9 +290,19 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
          base_entry.offset = uniform_ring.Push(
              std::span<const u8>(reinterpret_cast<const u8*>(bases.data()), sizeof(bases)));
          base_entry.size = sizeof(bases);
@@ -513,8 +529,10 @@ index 270365eb7e..fed4ff4a15 100644
 +            auto& index_entry = entries[count + 1];
 +            index_entry.binding = Shader::Backend::WGSL::MAX_PULLED_BUFFERS + 1;
 +            index_entry.buffer = indexed ? runtime.index.buffer : uniform_ring.Buffer();
-+            index_entry.offset = indexed ? runtime.index.offset : 0;
-+            index_entry.size = indexed ? runtime.index.size : 4;
++            index_entry.offset = indexed ? Common::AlignDown(runtime.index.offset, 256) : 0;
++            index_entry.size = indexed
++                                   ? (runtime.index.buffer.GetSize() - index_entry.offset) & ~3ULL
++                                   : 4;
 +            read_buffers.push_back(index_entry.buffer.Get());
 +        }
          wgpu::BindGroupDescriptor desc{};
@@ -524,7 +542,7 @@ index 270365eb7e..fed4ff4a15 100644
          desc.entries = entries.data();
          pulled_group = Thread::Get().device.CreateBindGroup(&desc);
      }
-@@ -415,7 +446,12 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -415,7 +452,12 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
                                    regs.blend_color.a};
      pass.SetBlendConstant(&blend_color);
      pass.SetStencilReference(regs.stencil_front_ref & 0xFF);
