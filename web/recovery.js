@@ -21,6 +21,7 @@ const META_KEY = '__meta';
 const JOURNAL_KEY = 'nx-web-save-journal';
 const JOURNAL_LIMIT = 2 * 1024 * 1024;
 const restoredSignatures = new WeakMap();
+const bundledSignatures = new WeakMap();
 export const SLOT_COUNT = 8;
 
 function openDb() {
@@ -65,6 +66,7 @@ const requestResult = request => new Promise((resolve, reject) => {
 /// Lists the save files as [relative path, stat] pairs.
 function listSaveFiles(FS) {
   const files = [];
+  const bundled = bundledSignatures.get(FS);
   const walk = (dir, rel) => {
     let names;
     try {
@@ -76,20 +78,29 @@ function listSaveFiles(FS) {
       if (name === '.' || name === '..') continue;
       const path = `${dir}/${name}`;
       const stat = FS.stat(path);
-      if (FS.isDir(stat.mode)) walk(path, `${rel}/${name}`);
-      else files.push([`${rel}/${name}`, stat]);
+      const relative = `${rel}/${name}`;
+      if (FS.isDir(stat.mode)) walk(path, relative);
+      else if (bundled?.get(relative) !== fileSignature(stat)) files.push([relative, stat]);
     }
   };
   for (const dir of SAVE_DIRS) walk(`${EDEN_DATA_ROOT}/${dir}`, dir);
   return files;
 }
 
+const fileSignature = stat => `${stat.size}:${+stat.mtime}`;
+
+export function trackBundledSdFiles(FS, paths) {
+  bundledSignatures.set(FS, new Map(paths.map(path => [
+    path, fileSignature(FS.stat(`${EDEN_DATA_ROOT}/${path}`)),
+  ])));
+}
+
 function signature(files) {
-  return files.map(([path, stat]) => `${path}:${stat.size}:${+stat.mtime}`).sort().join('|');
+  return files.map(([path, stat]) => `${path}:${fileSignature(stat)}`).sort().join('|');
 }
 
 function fileSignatures(files) {
-  return new Map(files.map(([path, stat]) => [path, `${stat.size}:${+stat.mtime}`]));
+  return new Map(files.map(([path, stat]) => [path, fileSignature(stat)]));
 }
 
 function readJournal() {

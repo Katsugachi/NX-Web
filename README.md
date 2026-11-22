@@ -67,6 +67,11 @@ or press **O** to open a file. ZIP and the engine's libarchive-supported formats
 handled locally. Recent tiles store names and sizes only; reopening asks you to
 choose the file again. No game cover art or game files are shipped.
 
+For a ZIP with a single homebrew NRO, NX-Web also loads assets from its
+`switch/<app>/` folder onto the virtual SD card. Put the NRO in that folder
+or name it `<app>.nro` at the ZIP root. Existing SD saves take priority;
+unchanged bundled files are mounted each launch, not copied into save backups.
+
 While playing, move the mouse or press **Esc** to show the bar. It fades after two
 idle seconds. **Tab** opens Settings, **?** shows the shortcut sheet. The canvas fits
 the full viewport at 16:9. Every keyboard mapping can be changed in
