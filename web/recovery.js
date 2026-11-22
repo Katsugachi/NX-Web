@@ -2,8 +2,8 @@
 // Keeps in-game saves across crashes and reloads, and records crashes for later testing.
 //
 // Save points: the save folders in the engine's in-memory filesystem are copied to IndexedDB
-// whenever they change and then stay unchanged for a poll interval, so a snapshot is never taken
-// halfway through the game writing a save. Every boot restores the latest snapshot. Save points
+// whenever a poll detects a change. A bounded synchronous journal protects recent changes on
+// page hide. Every boot restores the latest snapshot and journal. Save points
 // can be exported to and imported from ZIP archives.
 //
 // Save slots keep a copy of one game's save folder. Loading a slot puts it back into the save
@@ -18,6 +18,9 @@ const SAVES = 'saves';
 const CRASHES = 'crashes';
 const SLOTS = 'slots';
 const META_KEY = '__meta';
+const JOURNAL_KEY = 'nx-web-save-journal';
+const JOURNAL_LIMIT = 2 * 1024 * 1024;
+const restoredSignatures = new WeakMap();
 export const SLOT_COUNT = 8;
 
 function openDb() {
@@ -85,12 +88,77 @@ function signature(files) {
   return files.map(([path, stat]) => `${path}:${stat.size}:${+stat.mtime}`).sort().join('|');
 }
 
+function fileSignatures(files) {
+  return new Map(files.map(([path, stat]) => [path, `${stat.size}:${+stat.mtime}`]));
+}
+
+function readJournal() {
+  try { return globalThis.localStorage?.getItem(JOURNAL_KEY) ?? null; }
+  catch (err) { console.warn('Save journal unavailable:', err); return null; }
+}
+
+function clearJournal(expected = readJournal()) {
+  try {
+    if (readJournal() === expected) globalThis.localStorage?.removeItem(JOURNAL_KEY);
+  } catch (err) { console.warn('Save journal could not be cleared:', err); }
+}
+
+function writeJournal(FS, files, stored) {
+  try {
+    const current = fileSignatures(files);
+    const changes = [];
+    let encodedSize = 0;
+    for (const [path, sig] of current) {
+      if (stored.get(path) === sig) continue;
+      const data = FS.readFile(`${EDEN_DATA_ROOT}/${path}`);
+      encodedSize += 4 * Math.ceil(data.length / 3) + path.length;
+      if (encodedSize > JOURNAL_LIMIT) throw new Error('Save journal exceeds 2 MB');
+      let binary = '';
+      for (let i = 0; i < data.length; i += 8192) binary += String.fromCharCode(...data.subarray(i, i + 8192));
+      changes.push([path, btoa(binary)]);
+    }
+    for (const path of stored.keys()) if (!current.has(path)) changes.push([path, null]);
+    if (!changes.length) return;
+    const journal = JSON.stringify({ time:Date.now(), changes });
+    if (journal.length > JOURNAL_LIMIT) throw new Error('Save journal exceeds 2 MB');
+    globalThis.localStorage?.setItem(JOURNAL_KEY, journal);
+  } catch (err) { console.warn('Save journal skipped:', err); }
+}
+
 /// Writes the stored save point into the engine filesystem. Returns the number of files.
 export async function restoreSaves(FS) {
-  const entries = await withStore(SAVES, 'readonly', async store => {
+  let entries = await withStore(SAVES, 'readonly', async store => {
     const [keys, values] = await Promise.all([requestResult(store.getAllKeys()), requestResult(store.getAll())]);
     return keys.map((key, i) => [key, values[i]]);
   });
+  const raw = readJournal();
+  let journal;
+  try {
+    if (raw) {
+      if (raw.length > JOURNAL_LIMIT) throw new Error('Save journal exceeds 2 MB');
+      journal = JSON.parse(raw);
+      if (!Number.isFinite(journal.time) || !Array.isArray(journal.changes)) throw new Error('Invalid save journal');
+      journal.changes = journal.changes.map(([path, data]) => {
+        if (typeof path !== 'string' || !SAVE_DIRS.some(dir => path.startsWith(`${dir}/`)) || path.includes('\\') || path.split('/').some(part => !part || part === '.' || part === '..') || (data !== null && typeof data !== 'string')) throw new Error('Invalid journal path or contents');
+        return [path, data === null ? null : new Blob([Uint8Array.from(atob(data), c => c.charCodeAt(0))])];
+      });
+    }
+  } catch (err) { console.warn('Save journal ignored:', err); journal = null; }
+  if (journal && journal.time >= (entries.find(([path]) => path === META_KEY)?.[1]?.time ?? 0)) {
+    const merged = new Map(entries.filter(([path]) => path !== META_KEY));
+    for (const [path, data] of journal.changes) {
+      if (data === null) merged.delete(path);
+      else merged.set(path, data);
+    }
+    const meta = { time:Math.max(Date.now(), journal.time), files:merged.size, bytes:[...merged.values()].reduce((sum, blob) => sum + blob.size, 0) };
+    merged.set(META_KEY, meta);
+    await withStore(SAVES, 'readwrite', store => {
+      store.clear();
+      for (const [path, data] of merged) store.put(data, path);
+    });
+    entries = [...merged];
+    clearJournal(raw);
+  } else if (journal) clearJournal(raw);
   let count = 0;
   for (const [path, data] of entries) {
     if (path === META_KEY) continue;
@@ -99,10 +167,12 @@ export async function restoreSaves(FS) {
     FS.writeFile(full, new Uint8Array(await data.arrayBuffer()));
     count++;
   }
+  restoredSignatures.set(FS, fileSignatures(listSaveFiles(FS)));
   return count;
 }
 
 async function storeSaves(FS, files, connection) {
+  const journal = readJournal();
   const meta = { time: Date.now(), files: files.length, bytes: 0 };
   await withStore(SAVES, 'readwrite', store => {
     store.clear();
@@ -113,6 +183,7 @@ async function storeSaves(FS, files, connection) {
     }
     store.put(meta, META_KEY);
   }, connection);
+  clearJournal(journal);
   return meta;
 }
 
@@ -123,6 +194,7 @@ export async function savePointInfo() {
 export async function clearSaves(stopWatching) {
   await stopWatching?.();
   await withStore(SAVES, 'readwrite', store => store.clear());
+  clearJournal();
 }
 
 async function storedSaves() {
@@ -255,16 +327,16 @@ export async function clearSlot(slot) {
   await withStore(SLOTS, 'readwrite', store => store.delete(slot));
 }
 
-/// Polls the save folders while `healthy()` holds and stores a save point once a change has
-/// settled. Returns a function that stops watching.
-export function watchSaves(getFS, healthy, onSaved, intervalMs = 10_000, lifecycle = globalThis) {
+/// Polls the save folders while `healthy()` holds and stores changes immediately.
+/// Returns a function that stops watching.
+export function watchSaves(getFS, healthy, onSaved, intervalMs = 2_000, lifecycle = globalThis) {
   let connection;
   const ready = openDb().then(db => { connection = db; }).catch(err => {
     console.warn('Save database failed:', err);
   });
   const initialFS = getFS();
-  let stored = initialFS ? signature(listSaveFiles(initialFS)) : null;
-  let pending = null;
+  let storedFiles = restoredSignatures.get(initialFS) ?? fileSignatures(initialFS ? listSaveFiles(initialFS) : []);
+  let stored = [...storedFiles].map(([path, sig]) => `${path}:${sig}`).sort().join('|');
   let busy = null;
   let active = true;
   const flush = (immediate = false) => {
@@ -276,24 +348,28 @@ export function watchSaves(getFS, healthy, onSaved, intervalMs = 10_000, lifecyc
       try {
         const files = listSaveFiles(FS);
         const sig = signature(files);
-        if (immediate || (sig !== stored && sig === pending)) {
+        if (immediate || sig !== stored) {
           onSaved(await storeSaves(FS, files, connection));
           stored = sig;
-        } else if (stored === null) {
-          // The first poll after boot only records what was restored.
-          stored = sig;
+          storedFiles = fileSignatures(files);
+          restoredSignatures.set(FS, storedFiles);
         }
-        pending = sig;
       } catch (err) {
         console.warn('Save point failed:', err);
       }
     })().finally(() => { busy = null; });
     return busy;
   };
-  const onHidden = () => {
-    if (lifecycle.document?.visibilityState === 'hidden') flush(true);
+  const onPageHide = () => {
+    const FS = getFS();
+    if (!active || !FS || !healthy()) return;
+    try { writeJournal(FS, listSaveFiles(FS), storedFiles); }
+    catch (err) { console.warn('Save journal skipped:', err); }
+    flush(true);
   };
-  const onPageHide = () => { flush(true); };
+  const onHidden = () => {
+    if (lifecycle.document?.visibilityState === 'hidden') onPageHide();
+  };
   lifecycle.document?.addEventListener('visibilitychange', onHidden);
   lifecycle.addEventListener?.('pagehide', onPageHide);
   const timer = setInterval(() => flush(), intervalMs);
