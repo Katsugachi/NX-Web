@@ -1,11 +1,66 @@
 diff --git a/src/shader_recompiler/backend/wgsl/emit_wgsl.cpp b/src/shader_recompiler/backend/wgsl/emit_wgsl.cpp
-index d749bd53f0..54a3b3bdaf 100644
+index d749bd53f0..a58c2f0e9e 100644
 --- a/src/shader_recompiler/backend/wgsl/emit_wgsl.cpp
 +++ b/src/shader_recompiler/backend/wgsl/emit_wgsl.cpp
-@@ -275,4 +275,82 @@ std::string EmitWGSL(const Profile& profile, const RuntimeInfo& runtime_info, IR
+@@ -13,6 +13,7 @@
+ #include "common/settings.h"
+ #include "shader_recompiler/backend/wgsl/emit_wgsl.h"
+ #include "shader_recompiler/backend/wgsl/emit_wgsl_instructions.h"
++#include "shader_recompiler/backend/wgsl/tessellator.h"
+ #include "shader_recompiler/backend/wgsl/wgsl_emit_context.h"
+ #include "shader_recompiler/frontend/ir/ir_emitter.h"
+
+@@ -155,6 +156,7 @@ bool NeedsReturnFlag(const IR::Program& program) {
+ }
+
+ void EmitCode(EmitContext& ctx, const IR::Program& program) {
++    u32 bounded_loop_count{};
+     const bool return_flag{NeedsReturnFlag(program)};
+     if (return_flag) {
+         ctx.Add("var v_ret = false;");
+@@ -216,14 +218,21 @@ void EmitCode(EmitContext& ctx, const IR::Program& program) {
+             break;
+         case IR::AbstractSyntaxNode::Type::Loop:
+             ++depth;
+-            ctx.Add("loop {{");
++            if (!ctx.options.function_prefix.empty()) {
++                const u32 loop = bounded_loop_count++;
++                ctx.Add("for(var bounded_loop{0}=0u;bounded_loop{0}<1024u;bounded_loop{0}++){{",
++                        loop);
++            } else {
++                ctx.Add("loop {{");
++            }
+             if (return_flag && may_have_returned) {
+                 ctx.Add("if (v_ret) {{ break; }}");
+             }
+             break;
+         case IR::AbstractSyntaxNode::Type::Repeat:
+             --depth;
+-            if (Settings::values.disable_shader_loop_safety_checks) {
++            if (!ctx.options.function_prefix.empty() ||
++                Settings::values.disable_shader_loop_safety_checks) {
+                 ctx.Add("if (!({})) {{ break; }}\n}}", ctx.var_alloc.Consume(node.data.repeat.cond));
+             } else {
+                 const u32 loop_var{ctx.num_safety_loop_vars++};
+@@ -262,6 +271,14 @@ std::string EmitWGSL(const Profile& profile, const RuntimeInfo& runtime_info, IR
+     EmitContext ctx{program, bindings, profile, runtime_info, options};
+     Precolor(program);
+     EmitCode(ctx, program);
++    if (!options.function_prefix.empty()) {
++        const std::string bounded = "for(var atomic_retry=0u;atomic_retry<1024u;atomic_retry++) {";
++        size_t offset{};
++        while ((offset = ctx.code.find("loop {", offset)) != std::string::npos) {
++            ctx.code.replace(offset, 6, bounded);
++            offset += bounded.size();
++        }
++    }
+     std::string body{"fn main_body() {\n"};
+     DefineVariables(ctx, body);
+     if (ctx.uses_cc_carry) {
+@@ -275,4 +292,299 @@ std::string EmitWGSL(const Profile& profile, const RuntimeInfo& runtime_info, IR
      return ctx.Finish(program);
  }
- 
+
 +std::string EmitGeometryEntry(const IR::Program& vertex, const IR::Program& geometry,
 +                              const RuntimeInfo& runtime_info, const Options& options) {
 +    const u32 width = geometry.output_topology == OutputTopology::TriangleStrip ? 3
@@ -84,39 +139,324 @@ index d749bd53f0..54a3b3bdaf 100644
 +    return text;
 +}
 +
++std::string EmitTessellationEntry(const IR::Program& vertex, const IR::Program* control,
++                                  const IR::Program& evaluation, const RuntimeInfo& runtime_info,
++                                  const Options& options, u32 patch_size, u32 output_mode,
++                                  bool compute) {
++    const u32 count = control ? control->invocations : patch_size;
++    std::string text = "struct TessCP { position:vec4<f32>,\n";
++    for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
++        if (evaluation.info.loads.Generic(index)) {
++            text += fmt::format("attr{}:vec4<f32>,\n", index);
++        }
++    }
++    text += fmt::format("}}\nstruct TessPatch {{ cp:array<TessCP,{}>,\n", count);
++    for (size_t index = 0; index < evaluation.info.uses_patches.size(); ++index) {
++        if (evaluation.info.uses_patches[index] ||
++            (control && control->info.uses_patches[index])) {
++            text += fmt::format("patch{}:vec4<f32>,\n", index);
++        }
++    }
++    text += "outer:vec4<f32>, inner:vec4<f32> }\n";
++    if (compute) {
++        text += R"(
++struct TessArgs { count:atomic<u32>, instances:u32, first:u32, base:u32, overflow:atomic<u32> }
++@group(3) @binding(0) var<storage,read_write> tess_patches:array<TessPatch>;
++@group(3) @binding(1) var<storage,read_write> tess_records:array<vec4<u32>>;
++@group(3) @binding(2) var<storage,read_write> tess_args:TessArgs;
++var<private> tess_patch_index:u32;
++fn tess_reserve(count:u32)->u32 {
++    let capacity=min(draw_info.tess_draw.w,arrayLength(&tess_records));
++    for(var attempt=0u;attempt<1024u;attempt++) {
++        let old=atomicLoad(&tess_args.count);
++        if (count>capacity || old>capacity-count) {
++            atomicStore(&tess_args.overflow,1u); return 0xffffffffu;
++        }
++        let result=atomicCompareExchangeWeak(&tess_args.count,old,old+count);
++        if (result.exchanged) { return old; }
++    }
++    atomicStore(&tess_args.overflow,1u); return 0xffffffffu;
++}
++fn tess_record(index:u32,uv:vec2<f32>) {
++    tess_records[index]=vec4<u32>(tess_patch_index,bitcast<u32>(uv.x),bitcast<u32>(uv.y),0u);
++}
++)";
++        text += fmt::format("const tess_spacing={}u;\nconst tess_mode={}u;\n",
++                            static_cast<u32>(runtime_info.tess_spacing), output_mode);
++        text += R"(
++fn tess_point(a:vec2<f32>) {
++    if (tess_mode!=0u) { return; }
++    let index=tess_reserve(1u);
++    if(index!=0xffffffffu) { tess_record(index,a); }
++}
++fn tess_line(a:vec2<f32>,b:vec2<f32>) {
++    if (tess_mode==0u) { return; }
++    let index=tess_reserve(2u);
++    if(index!=0xffffffffu) { tess_record(index,a); tess_record(index+1u,b); }
++}
++fn tess_triangle(a:vec2<f32>,v1:vec2<f32>,v2:vec2<f32>) {
++    if (tess_mode==0u) { return; }
++    var b=v1; var c=v2;
++)";
++        if (runtime_info.tess_clockwise) {
++            text += "b=v2; c=v1;\n";
++        }
++        text += R"(
++    if(tess_mode==1u) {
++        let index=tess_reserve(6u);
++        if(index==0xffffffffu) { return; }
++        tess_record(index,a); tess_record(index+1u,b);
++        tess_record(index+2u,b); tess_record(index+3u,c);
++        tess_record(index+4u,c); tess_record(index+5u,a);
++    } else {
++        let index=tess_reserve(3u);
++        if(index==0xffffffffu) { return; }
++        tess_record(index,a); tess_record(index+1u,b); tess_record(index+2u,c);
++    }
++}
++)";
++        text += TESSELLATOR;
++        text += fmt::format("@group({}) @binding({}) var<storage,read> tess_indices:array<u32>;\n",
++                            PULLED_VERTEX_GROUP, MAX_PULLED_BUFFERS + 1);
++        text += R"(
++@compute @workgroup_size(1) fn tess_main(@builtin(global_invocation_id) id:vec3<u32>) {
++    if(id.x>=min(draw_info.tess_draw.x*draw_info.tess_draw.y,arrayLength(&tess_patches)) || draw_info.tess_draw.x==0u) { return; }
++    tess_patch_index=id.x;
++    let primitive=id.x%draw_info.tess_draw.x;
++    let instance=id.x/draw_info.tess_draw.x+draw_info.base_instance;
++    tess_patches[id.x].outer=draw_info.tess_outer;
++    tess_patches[id.x].inner=draw_info.tess_inner;
++    var input:s0_VSInput; input.instance_index=instance;
++)";
++        if (control) {
++            for (size_t index = 0; index < control->info.uses_patches.size(); ++index) {
++                if (control->info.uses_patches[index]) {
++                    text += fmt::format("s2_patch_attr{}=vec4<f32>();\n", index);
++                }
++            }
++            text += "for(var i=0u;i<4u;i++){s2_tess_outer[i]=tess_patches[id.x].outer[i];}\n"
++                    "for(var i=0u;i<2u;i++){s2_tess_inner[i]=tess_patches[id.x].inner[i];}\n"
++                    "s2_v_primitive_id=primitive; s2_v_instance_id=instance;\n";
++        }
++        text += fmt::format("for(var k=0u;k<{}u;k++){{\n"
++                            "let address=u32(draw_info.render_area.w)/4u+primitive*{}u+k;\n"
++                            "let guest=tess_indices[address]+draw_info.base_vertex;\n"
++                            "input.vertex_index=guest; let value=s0_run(input,guest);\n",
++                            patch_size, patch_size);
++        text += control ? "s2_in_position[k]=value.position;\n"
++                        : "tess_patches[id.x].cp[k].position=value.position;\n";
++        const auto& inputs = control ? control->info : evaluation.info;
++        for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
++            if (!inputs.loads.Generic(index)) {
++                continue;
++            }
++            const auto value = vertex.info.stores.Generic(index) ? fmt::format("value.out{}", index)
++                                                                 : "vec4<f32>(0.0,0.0,0.0,1.0)";
++            text += control ? fmt::format("s2_in_attr{}[k]={};\n", index, value)
++                            : fmt::format("tess_patches[id.x].cp[k].attr{}={};\n", index, value);
++        }
++        text += "}\n";
++        if (control) {
++            text += fmt::format("for(var invocation=0u;invocation<{}u;invocation++){{\n"
++                                "s2_v_invocation_id=invocation; s2_run();\n"
++                                "tess_patches[id.x].cp[invocation].position=s2_v_position;\n",
++                                count);
++            for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
++                if (evaluation.info.loads.Generic(index)) {
++                    text += fmt::format("tess_patches[id.x].cp[invocation].attr{}={};\n", index,
++                                        control->info.stores.Generic(index)
++                                            ? fmt::format("s2_out_attr{}", index)
++                                            : "vec4<f32>(0.0,0.0,0.0,1.0)");
++                }
++            }
++            text += "}\n";
++        }
++        for (size_t index = 0; index < evaluation.info.uses_patches.size(); ++index) {
++            if (evaluation.info.uses_patches[index] ||
++                (control && control->info.uses_patches[index])) {
++                text += fmt::format("tess_patches[id.x].patch{}={};\n", index,
++                                    control && control->info.uses_patches[index]
++                                        ? fmt::format("s2_patch_attr{}", index)
++                                        : "vec4<f32>()");
++            }
++        }
++        if (control) {
++            text += "for(var i=0u;i<4u;i++){tess_patches[id.x].outer[i]=s2_tess_outer[i];}\n"
++                    "for(var i=0u;i<2u;i++){tess_patches[id.x].inner[i]=s2_tess_inner[i];}\n";
++        }
++        switch (runtime_info.tess_primitive) {
++        case TessPrimitive::Triangles:
++            text += "tess_triangles(tess_patches[id.x].outer,tess_patches[id.x].inner.xy);\n";
++            break;
++        case TessPrimitive::Quads:
++            text += "tess_quads(tess_patches[id.x].outer,tess_patches[id.x].inner.xy);\n";
++            break;
++        case TessPrimitive::Isolines:
++            text += "tess_isolines(tess_patches[id.x].outer);\n";
++            break;
++        }
++        text += "}\n@compute @workgroup_size(1) fn tess_finish(){tess_args.instances=1u;}\n";
++        return text;
++    }
++    text += R"(
++@group(3) @binding(0) var<storage,read> tess_patches:array<TessPatch>;
++@group(3) @binding(1) var<storage,read> tess_records:array<vec4<u32>>;
++struct TessOutput { @builtin(position) position:vec4<f32>,
++)";
++    for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
++        if (evaluation.info.stores.Generic(index)) {
++            const auto interpolation = options.output_interpolation[index];
++            text += fmt::format("@location({}) @interpolate({}) out{}:vec4<f32>,\n", index,
++                                interpolation == Interpolation::Flat            ? "flat"
++                                : interpolation == Interpolation::NoPerspective ? "linear"
++                                                                                : "perspective",
++                                index);
++        }
++    }
++    text += R"(
++}
++@vertex fn main(@builtin(vertex_index) index:u32)->TessOutput {
++    let record=tess_records[index];
++    s3_v_primitive_id=record.x%draw_info.tess_draw.x;
++    s3_v_instance_id=record.x/draw_info.tess_draw.x+draw_info.base_instance;
++    let uv=bitcast<vec2<f32>>(record.yz);
++)";
++    text += runtime_info.tess_primitive == TessPrimitive::Triangles
++                ? "s3_v_tess_coord=vec3<f32>(uv,1.0-uv.x-uv.y);\n"
++                : "s3_v_tess_coord=vec3<f32>(uv,0.0);\n";
++    for (size_t index = 0; index < evaluation.info.uses_patches.size(); ++index) {
++        if (evaluation.info.uses_patches[index]) {
++            text += fmt::format("s3_patch_attr{0}=tess_patches[record.x].patch{0};\n", index);
++        }
++    }
++    text += "for(var i=0u;i<4u;i++){s3_tess_outer[i]=tess_patches[record.x].outer[i];}\n"
++            "for(var i=0u;i<2u;i++){s3_tess_inner[i]=tess_patches[record.x].inner[i];}\n";
++    text += fmt::format(
++        "for(var k=0u;k<{}u;k++){{\ns3_in_position[k]=tess_patches[record.x].cp[k].position;\n",
++        count);
++    for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
++        if (evaluation.info.loads.Generic(index)) {
++            text +=
++                fmt::format("s3_in_attr{0}[k]=tess_patches[record.x].cp[k].attr{0};\n", index);
++        }
++    }
++    text += "}\ns3_run(); var output:TessOutput; var pos=s3_v_position;\n";
++    if (runtime_info.convert_depth_mode) {
++        text += "pos.z=(pos.z+pos.w)*0.5;\n";
++    }
++    text += "if(draw_info.depth_flip!=0u){pos.z=pos.w-pos.z;}\n"
++            "pos.x=pos.x*draw_info.viewport.x+pos.w*draw_info.viewport.y;\n"
++            "pos.y=pos.y*draw_info.viewport.z+pos.w*draw_info.viewport.w;\noutput.position=pos;\n";
++    for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
++        if (evaluation.info.stores.Generic(index)) {
++            text += fmt::format("output.out{0}=s3_out_attr{0};\n", index);
++        }
++    }
++    text += "return output;\n}\n";
++    return text;
++}
++
  } // namespace Shader::Backend::WGSL
 diff --git a/src/shader_recompiler/backend/wgsl/emit_wgsl.h b/src/shader_recompiler/backend/wgsl/emit_wgsl.h
-index 07bb52292a..aeee9081e4 100644
+index 07bb52292a..aa1a35accc 100644
 --- a/src/shader_recompiler/backend/wgsl/emit_wgsl.h
 +++ b/src/shader_recompiler/backend/wgsl/emit_wgsl.h
-@@ -53,6 +53,8 @@ constexpr u32 PULLED_VERTEX_GROUP = 2;
+@@ -53,6 +53,9 @@ constexpr u32 PULLED_VERTEX_GROUP = 2;
  constexpr u32 MAX_PULLED_BUFFERS = 8;
- 
+
  struct Options {
++    u32 input_vertices = 32;
 +    std::string function_prefix;
 +    bool shared_declarations = true;
      bool fill_rectangle = false;
      /// Kind of each texture descriptor element, in descriptor order.
      std::vector<TextureSampleKind> texture_kinds;
-@@ -159,4 +161,8 @@ struct DrawInfo {
+@@ -153,10 +156,24 @@ struct DrawInfo {
+     u32 base_instance;
+     u32 depth_flip; ///< 1 maps z to w - z (reversed guest depth ranges)
+     u32 padding;
++    std::array<f32, 4> tess_outer;
++    std::array<f32, 4> tess_inner;
++    std::array<u32, 4> tess_draw;
+ };
+
+ [[nodiscard]] std::string EmitWGSL(const Profile& profile, const RuntimeInfo& runtime_info,
                                     IR::Program& program, Bindings& bindings,
                                     const Options& options);
- 
+
 +[[nodiscard]] std::string EmitGeometryEntry(const IR::Program& vertex, const IR::Program& geometry,
 +                                            const RuntimeInfo& runtime_info,
 +                                            const Options& options);
 +
++[[nodiscard]] std::string EmitTessellationEntry(const IR::Program& vertex,
++                                                const IR::Program* control,
++                                                const IR::Program& evaluation,
++                                                const RuntimeInfo& runtime_info,
++                                                const Options& options, u32 patch_size,
++                                                u32 output_mode, bool compute);
++
+ } // namespace Shader::Backend::WGSL
+diff --git a/src/shader_recompiler/backend/wgsl/emit_wgsl_barriers.cpp b/src/shader_recompiler/backend/wgsl/emit_wgsl_barriers.cpp
+index 11b6149bbc..7584ddf5aa 100644
+--- a/src/shader_recompiler/backend/wgsl/emit_wgsl_barriers.cpp
++++ b/src/shader_recompiler/backend/wgsl/emit_wgsl_barriers.cpp
+@@ -9,14 +9,20 @@
+
+ namespace Shader::Backend::WGSL {
+ void EmitBarrier(EmitContext& ctx) {
+-    ctx.Add("workgroupBarrier();");
++    if (ctx.stage != Stage::TessellationControl) {
++        ctx.Add("workgroupBarrier();");
++    }
+ }
+
+ void EmitWorkgroupMemoryBarrier(EmitContext& ctx) {
+-    ctx.Add("workgroupBarrier();");
++    if (ctx.stage != Stage::TessellationControl) {
++        ctx.Add("workgroupBarrier();");
++    }
+ }
+
+ void EmitDeviceMemoryBarrier(EmitContext& ctx) {
+-    ctx.Add("storageBarrier();");
++    if (ctx.stage != Stage::TessellationControl) {
++        ctx.Add("storageBarrier();");
++    }
+ }
  } // namespace Shader::Backend::WGSL
 diff --git a/src/shader_recompiler/backend/wgsl/emit_wgsl_context_get_set.cpp b/src/shader_recompiler/backend/wgsl/emit_wgsl_context_get_set.cpp
-index ea836ab154..7e588fb3aa 100644
+index ea836ab154..29be4f3a17 100644
 --- a/src/shader_recompiler/backend/wgsl/emit_wgsl_context_get_set.cpp
 +++ b/src/shader_recompiler/backend/wgsl/emit_wgsl_context_get_set.cpp
-@@ -156,7 +156,11 @@ void EmitGetAttribute(EmitContext& ctx, IR::Inst& inst, IR::Attribute attr,
+@@ -17,6 +17,22 @@ namespace Shader::Backend::WGSL {
+ namespace {
+ constexpr char SWIZZLE[]{"xyzw"};
+
++bool ArrayInputs(Stage stage) {
++    return stage == Stage::Geometry || stage == Stage::TessellationControl ||
++           stage == Stage::TessellationEval;
++}
++
++std::string PatchAccess(IR::Patch patch) {
++    const auto index = static_cast<u32>(patch);
++    if (index < 4) {
++        return fmt::format("tess_outer[{}u]", index);
++    }
++    if (index < 6) {
++        return fmt::format("tess_inner[{}u]", index - 4);
++    }
++    return fmt::format("patch_attr{}[{}u]", (index - 6) / 4, (index - 6) % 4);
++}
++
+ /// Formats accesses to one constant buffer, consuming a dynamic binding exactly once.
+ class CbufAccess {
+ public:
+@@ -156,7 +172,11 @@ void EmitGetAttribute(EmitContext& ctx, IR::Inst& inst, IR::Attribute attr,
              ctx.AddF32("{}={};", inst, element == 3 ? "1.0" : "0.0");
              return;
          }
 -        ctx.AddF32("{}=in_attr{}.{};", inst, index, swizzle);
-+        if (ctx.stage == Stage::Geometry) {
++        if (ArrayInputs(ctx.stage)) {
 +            ctx.AddF32("{}=in_attr{}[{}].{};", inst, index, vertex, swizzle);
 +        } else {
 +            ctx.AddF32("{}=in_attr{}.{};", inst, index, swizzle);
@@ -124,20 +464,20 @@ index ea836ab154..7e588fb3aa 100644
          return;
      }
      switch (attr) {
-@@ -166,6 +170,8 @@ void EmitGetAttribute(EmitContext& ctx, IR::Inst& inst, IR::Attribute attr,
+@@ -166,6 +186,8 @@ void EmitGetAttribute(EmitContext& ctx, IR::Inst& inst, IR::Attribute attr,
      case IR::Attribute::PositionW:
          if (ctx.stage == Stage::Fragment) {
              ctx.AddF32("{}=v_frag_coord.{};", inst, swizzle);
-+        } else if (ctx.stage == Stage::Geometry) {
++        } else if (ArrayInputs(ctx.stage)) {
 +            ctx.AddF32("{}=in_position[{}].{};", inst, vertex, swizzle);
          } else {
              ctx.AddF32("{}=v_position.{};", inst, swizzle);
          }
-@@ -186,6 +192,12 @@ void EmitGetAttribute(EmitContext& ctx, IR::Inst& inst, IR::Attribute attr,
+@@ -186,10 +208,20 @@ void EmitGetAttribute(EmitContext& ctx, IR::Inst& inst, IR::Attribute attr,
          ctx.AddF32("{}=bitcast<f32>(draw_info.base_vertex);", inst);
          break;
      case IR::Attribute::PrimitiveId:
-+        if (ctx.stage == Stage::Geometry) {
++        if (ArrayInputs(ctx.stage)) {
 +            ctx.AddF32("{}=bitcast<f32>(v_primitive_id);", inst);
 +            break;
 +        }
@@ -146,43 +486,75 @@ index ea836ab154..7e588fb3aa 100644
      case IR::Attribute::Layer:
      case IR::Attribute::DrawID:
          ctx.AddF32("{}=0.0;", inst);
-@@ -215,6 +227,8 @@ void EmitGetAttributeU32(EmitContext& ctx, IR::Inst& inst, IR::Attribute attr, s
+         break;
++    case IR::Attribute::TessellationEvaluationPointU:
++    case IR::Attribute::TessellationEvaluationPointV:
++        ctx.AddF32("{}=v_tess_coord.{};", inst, swizzle);
++        break;
+     case IR::Attribute::PointSpriteS:
+     case IR::Attribute::PointSpriteT:
+         // Points are always one pixel in WebGPU.
+@@ -215,6 +247,8 @@ void EmitGetAttributeU32(EmitContext& ctx, IR::Inst& inst, IR::Attribute attr, s
          ctx.AddU32("{}=draw_info.base_vertex;", inst);
          break;
      case IR::Attribute::PrimitiveId:
-+        ctx.AddU32("{}={};", inst, ctx.stage == Stage::Geometry ? "v_primitive_id" : "0u");
++        ctx.AddU32("{}={};", inst, ArrayInputs(ctx.stage) ? "v_primitive_id" : "0u");
 +        break;
      case IR::Attribute::DrawID:
          ctx.AddU32("{}=0u;", inst);
          break;
-@@ -269,8 +283,9 @@ void EmitGetAttributeIndexed(EmitContext& ctx, IR::Inst& inst, std::string_view
+@@ -269,8 +303,9 @@ void EmitGetAttributeIndexed(EmitContext& ctx, IR::Inst& inst, std::string_view
              continue;
          }
          const u32 base{(static_cast<u32>(IR::Attribute::Generic0X) >> 2) + index};
 -        expr = fmt::format("select({},in_attr{}[(({})>>2u)&3u],(({})>>4u)=={}u)", expr, index, offset,
 -                           offset, base);
-+        const auto array = ctx.stage == Stage::Geometry ? fmt::format("[{}]", vertex) : "";
++        const auto array = ArrayInputs(ctx.stage) ? fmt::format("[{}]", vertex) : "";
 +        expr = fmt::format("select({},in_attr{}{}[(({})>>2u)&3u],(({})>>4u)=={}u)", expr, index,
 +                           array, offset, offset, base);
      }
      ctx.AddF32("{}={};", inst, expr);
  }
-@@ -313,7 +328,7 @@ void EmitWorkgroupId(EmitContext& ctx, IR::Inst& inst) {
+@@ -283,11 +318,11 @@ void EmitSetAttributeIndexed([[maybe_unused]] EmitContext& ctx,
  }
- 
+
+ void EmitGetPatch(EmitContext& ctx, IR::Inst& inst, IR::Patch patch) {
+-    NotImplemented();
++    ctx.AddF32("{}={};", inst, PatchAccess(patch));
+ }
+
+ void EmitSetPatch(EmitContext& ctx, IR::Patch patch, std::string_view value) {
+-    NotImplemented();
++    ctx.Add("{}={};", PatchAccess(patch), value);
+ }
+
+ void EmitSetFragColor(EmitContext& ctx, u32 index, u32 component, std::string_view value) {
+@@ -313,7 +348,7 @@ void EmitWorkgroupId(EmitContext& ctx, IR::Inst& inst) {
+ }
+
  void EmitInvocationId(EmitContext& ctx, IR::Inst& inst) {
 -    ctx.AddU32("{}=0u;", inst);
-+    ctx.AddU32("{}={};", inst, ctx.stage == Stage::Geometry ? "v_invocation_id" : "0u");
++    ctx.AddU32("{}={};", inst, ArrayInputs(ctx.stage) ? "v_invocation_id" : "0u");
  }
- 
+
  void EmitInvocationInfo(EmitContext& ctx, IR::Inst& inst) {
 diff --git a/src/shader_recompiler/backend/wgsl/emit_wgsl_special.cpp b/src/shader_recompiler/backend/wgsl/emit_wgsl_special.cpp
-index 6b8f4436c3..5869b6fc29 100644
+index 6b8f4436c3..602aaedd38 100644
 --- a/src/shader_recompiler/backend/wgsl/emit_wgsl_special.cpp
 +++ b/src/shader_recompiler/backend/wgsl/emit_wgsl_special.cpp
-@@ -63,12 +63,17 @@ void EmitPrologue(EmitContext& ctx) {
+@@ -13,7 +13,8 @@
+ namespace Shader::Backend::WGSL {
+ namespace {
+ void InitializeOutputVaryings(EmitContext& ctx) {
+-    if (ctx.stage == Stage::VertexB || ctx.stage == Stage::Geometry) {
++    if (ctx.stage == Stage::VertexB || ctx.stage == Stage::Geometry ||
++        ctx.stage == Stage::TessellationControl || ctx.stage == Stage::TessellationEval) {
+         ctx.Add("v_position = vec4<f32>(0.0, 0.0, 0.0, 1.0);");
+     }
+     for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
+@@ -63,12 +64,17 @@ void EmitPrologue(EmitContext& ctx) {
  void EmitEpilogue(EmitContext&) {}
- 
+
  void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
 -    // WebGPU has no geometry stage.
 -    ctx.var_alloc.Consume(stream);
@@ -191,7 +563,7 @@ index 6b8f4436c3..5869b6fc29 100644
 +        ctx.Add("if ({} == 0u) {{ gs_emit(); }}", value);
 +    }
  }
- 
+
  void EmitEndPrimitive(EmitContext& ctx, const IR::Value& stream) {
 -    ctx.var_alloc.Consume(stream);
 +    const auto value = ctx.var_alloc.Consume(stream);
@@ -199,22 +571,179 @@ index 6b8f4436c3..5869b6fc29 100644
 +        ctx.Add("if ({} == 0u) {{ gs_end(); }}", value);
 +    }
  }
- 
+
  } // namespace Shader::Backend::WGSL
+diff --git a/src/shader_recompiler/backend/wgsl/tessellator.h b/src/shader_recompiler/backend/wgsl/tessellator.h
+new file mode 100644
+index 0000000000..5d6e2a4681
+--- /dev/null
++++ b/src/shader_recompiler/backend/wgsl/tessellator.h
+@@ -0,0 +1,151 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <string_view>
++
++namespace Shader::Backend::WGSL {
++
++constexpr std::string_view TESSELLATOR = R"(
++fn tess_positive(level:f32)->bool {
++    return level>0.0 && (bitcast<u32>(level)&0x7fffffffu)<=0x7f800000u;
++}
++fn tess_segments(level: f32, spacing: u32) -> u32 {
++    let minimum = select(1.0, 2.0, spacing == 2u);
++    let maximum = select(64.0, 63.0, spacing == 1u);
++    let finite = select(level,minimum,(bitcast<u32>(level)&0x7fffffffu)>0x7f800000u);
++    let value = clamp(finite, minimum, maximum);
++    var n = u32(ceil(value));
++    if (spacing == 1u) { n += 1u - (n & 1u); }
++    if (spacing == 2u) { n += n & 1u; }
++    return clamp(n,1u,64u);
++}
++fn tess_parameter(i: u32, n: u32, level: f32, spacing: u32) -> f32 {
++    if (i == 0u) { return 0.0; }
++    if (i == n) { return 1.0; }
++    if (spacing == 0u || n == 1u) { return f32(i) / f32(n); }
++    let f = clamp(level, select(1.0, 2.0, spacing == 2u), select(64.0, 63.0, spacing == 1u));
++    return (1.0 - f32(n - 2u) / f) * 0.5 + f32(i - 1u) / f;
++}
++fn tess_tri_edge(a: f32, side: u32, t: f32) -> vec2<f32> {
++    let s = 1.0 - 3.0*a;
++    if (side == 0u) { return vec2<f32>(a + s*t, a); }
++    if (side == 1u) { return vec2<f32>(a + s*(1.0-t), a + s*t); }
++    return vec2<f32>(a, a + s*(1.0-t));
++}
++fn tess_join_tri(a: f32, b: f32, side: u32, n: u32, m: u32, level: f32, spacing: u32) {
++    var i = 0u;
++    var j = 0u;
++    for(var step=0u;step<128u;step++) {
++        if (i == n && j == m) { break; }
++        let x = tess_tri_edge(a, side, tess_parameter(i, n, level, spacing));
++        let y = tess_tri_edge(b, side, f32(j) / f32(max(m,1u)));
++        if (i < n && (j == m || f32(i+1u)*f32(m) <= f32(j+1u)*f32(n))) {
++            tess_triangle(x, tess_tri_edge(a, side, tess_parameter(i+1u,n,level,spacing)), y);
++            i++;
++        } else {
++            tess_triangle(x, tess_tri_edge(b,side,f32(j+1u)/f32(m)), y);
++            j++;
++        }
++    }
++}
++fn tess_triangles(outer: vec4<f32>, inner: vec2<f32>) {
++    let levels = vec3<f32>(outer.y, outer.z, outer.x);
++    if (!tess_positive(outer.x) || !tess_positive(outer.y) || !tess_positive(outer.z)) { return; }
++    var n = tess_segments(inner.x, tess_spacing);
++    var counts = vec3<u32>();
++    for (var side=0u; side<3u; side++) { counts[side]=tess_segments(levels[side],tess_spacing); }
++    if (n == 1u && all(counts == vec3<u32>(1u))) {
++        tess_point(vec2<f32>(0.0,0.0)); tess_point(vec2<f32>(1.0,0.0)); tess_point(vec2<f32>(0.0,1.0));
++        tess_triangle(vec2<f32>(0.0,0.0),vec2<f32>(1.0,0.0),vec2<f32>(0.0,1.0)); return;
++    }
++    var level = max(inner.x, 1.000001);
++    n = tess_segments(level,tess_spacing);
++    let first = tess_parameter(1u,n,level,tess_spacing);
++    var a = 0.0;
++    var b = first * (2.0/3.0);
++    var m = n-2u;
++    for (var side=0u;side<3u;side++) {
++        for (var i=0u;i<64u;i++) { if(i>=counts[side]){break;} tess_point(tess_tri_edge(0.0,side,tess_parameter(i,counts[side],levels[side],tess_spacing))); }
++        tess_join_tri(a,b,side,counts[side],m,levels[side],tess_spacing);
++    }
++    for(var ring=0u;ring<32u;ring++) {
++        if (m == 0u) { tess_point(vec2<f32>(1.0/3.0)); break; }
++        for (var side=0u;side<3u;side++) {
++            for (var i=0u;i<64u;i++) { if(i>=m){break;} tess_point(tess_tri_edge(b,side,f32(i)/f32(m))); }
++        }
++        if (m == 1u) {
++            tess_triangle(tess_tri_edge(b,0u,0.0),tess_tri_edge(b,1u,0.0),tess_tri_edge(b,2u,0.0)); break;
++        }
++        a=b;
++        b += (1.0-3.0*a)/f32(m)*(2.0/3.0);
++        let next=m-2u;
++        for(var side=0u;side<3u;side++) { tess_join_tri(a,b,side,m,next,1.0,0u); }
++        m=next;
++    }
++}
++fn tess_quad_edge(side: u32, t: f32) -> vec2<f32> {
++    if(side==0u) { return vec2<f32>(t,0.0); }
++    if(side==1u) { return vec2<f32>(1.0,t); }
++    if(side==2u) { return vec2<f32>(1.0-t,1.0); }
++    return vec2<f32>(0.0,1.0-t);
++}
++fn tess_quads(outer:vec4<f32>,inner:vec2<f32>) {
++    if(!tess_positive(outer.x) || !tess_positive(outer.y) || !tess_positive(outer.z) || !tess_positive(outer.w)) { return; }
++    let levels=vec4<f32>(outer.y,outer.z,outer.w,outer.x);
++    var counts=vec4<u32>();
++    for(var side=0u;side<4u;side++) { counts[side]=tess_segments(levels[side],tess_spacing); }
++    var nu=tess_segments(inner.y,tess_spacing);
++    var nv=tess_segments(inner.x,tess_spacing);
++    if(nu==1u && nv==1u && all(counts==vec4<u32>(1u))) {
++        for(var side=0u;side<4u;side++) { tess_point(tess_quad_edge(side,0.0)); }
++        tess_triangle(vec2<f32>(0.0,0.0),vec2<f32>(1.0,0.0),vec2<f32>(1.0,1.0));
++        tess_triangle(vec2<f32>(0.0,0.0),vec2<f32>(1.0,1.0),vec2<f32>(0.0,1.0)); return;
++    }
++    let ulevel=max(inner.y,1.000001);
++    let vlevel=max(inner.x,1.000001);
++    nu=tess_segments(ulevel,tess_spacing); nv=tess_segments(vlevel,tess_spacing);
++    let lo=vec2<f32>(tess_parameter(1u,nu,ulevel,tess_spacing),tess_parameter(1u,nv,vlevel,tess_spacing));
++    let hi=vec2<f32>(1.0)-lo;
++    for(var y=1u;y<64u;y++) { if(y>=nv){break;} for(var x=1u;x<64u;x++) { if(x>=nu){break;}
++        let a=vec2<f32>(tess_parameter(x,nu,ulevel,tess_spacing),tess_parameter(y,nv,vlevel,tess_spacing));
++        tess_point(a);
++        if(x+1u<nu && y+1u<nv) {
++            let b=vec2<f32>(tess_parameter(x+1u,nu,ulevel,tess_spacing),a.y);
++            let c=vec2<f32>(b.x,tess_parameter(y+1u,nv,vlevel,tess_spacing));
++            let d=vec2<f32>(a.x,c.y);
++            tess_triangle(a,b,c); tess_triangle(a,c,d);
++        }
++    }}
++    for(var side=0u;side<4u;side++) {
++        let n=counts[side];
++        let m=select(nu-2u,nv-2u,(side&1u)!=0u);
++        var i=0u; var j=0u;
++        for(var k=0u;k<64u;k++) { if(k>=n){break;} tess_point(tess_quad_edge(side,tess_parameter(k,n,levels[side],tess_spacing))); }
++        for(var step=0u;step<128u;step++) {
++            if(i==n && j==m) { break; }
++            let a=tess_quad_edge(side,tess_parameter(i,n,levels[side],tess_spacing));
++            let b=lo+(hi-lo)*tess_quad_edge(side,f32(j)/f32(max(m,1u)));
++            if(i<n && (j==m || f32(i+1u)*f32(m)<=f32(j+1u)*f32(n))) {
++                tess_triangle(a,tess_quad_edge(side,tess_parameter(i+1u,n,levels[side],tess_spacing)),b); i++;
++            } else {
++                tess_triangle(a,lo+(hi-lo)*tess_quad_edge(side,f32(j+1u)/f32(m)),b); j++;
++            }
++        }
++    }
++}
++fn tess_isolines(outer:vec4<f32>) {
++    if(!tess_positive(outer.x) || !tess_positive(outer.y)) { return; }
++    let lines=tess_segments(outer.x,0u);
++    let segments=tess_segments(outer.y,tess_spacing);
++    for(var line=0u;line<64u;line++) { if(line>=lines){break;}
++        for(var i=0u;i<65u;i++) { if(i>segments){break;}
++            let a=vec2<f32>(tess_parameter(i,segments,outer.y,tess_spacing),f32(line)/f32(lines));
++            tess_point(a);
++            if(i<segments) { tess_line(a,vec2<f32>(tess_parameter(i+1u,segments,outer.y,tess_spacing),a.y)); }
++        }
++    }
++}
++)";
++
++} // namespace Shader::Backend::WGSL
 diff --git a/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp b/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
-index 644fe1e06b..c5709a4a1d 100644
+index 644fe1e06b..2f230eedb9 100644
 --- a/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
 +++ b/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
 @@ -5,6 +5,8 @@
  // SPDX-License-Identifier: GPL-2.0-or-later
- 
+
  #include <algorithm>
 +#include <regex>
 +#include <unordered_set>
- 
+
  #include "common/div_ceil.h"
  #include "shader_recompiler/backend/bindings.h"
-@@ -223,14 +225,18 @@ EmitContext::EmitContext(IR::Program& program, Bindings& bindings, const Profile
+@@ -223,14 +225,19 @@ EmitContext::EmitContext(IR::Program& program, Bindings& bindings, const Profile
          stage_name = "cs";
          break;
      }
@@ -231,7 +760,8 @@ index 644fe1e06b..c5709a4a1d 100644
 +        header += "diagnostic(off, derivative_uniformity);\n";
 +        header +=
 +            "struct DrawInfo { viewport: vec4<f32>, render_area: vec4<f32>, base_vertex: u32, "
-+            "base_instance: u32, depth_flip: u32, padding: u32 }\n";
++            "base_instance: u32, depth_flip: u32, padding: u32, tess_outer: vec4<f32>, "
++            "tess_inner: vec4<f32>, tess_draw: vec4<u32> }\n";
 +        if (stage != Stage::Compute) {
 +            header += fmt::format("@group({}) @binding(0) var<uniform> draw_info: DrawInfo;\n",
 +                                  options.draw_info_group);
@@ -239,31 +769,47 @@ index 644fe1e06b..c5709a4a1d 100644
      }
      DefineConstantBuffers(bindings);
      DefineConstantBufferIndirect();
-@@ -390,10 +396,16 @@ void EmitContext::DefineInterface() {
+@@ -390,10 +397,30 @@ void EmitContext::DefineInterface() {
      switch (stage) {
      case Stage::VertexA:
      case Stage::VertexB:
++    case Stage::TessellationControl:
++    case Stage::TessellationEval:
 +    case Stage::Geometry:
          header += "var<private> v_position: vec4<f32>;\n"
                    "var<private> v_vertex_id: u32;\n"
                    "var<private> v_instance_id: u32;\n"
                    "var<private> v_point_size: f32;\n";
-+        if (stage == Stage::Geometry) {
-+            header += "var<private> in_position: array<vec4<f32>, 6>;\n"
-+                      "var<private> v_invocation_id: u32;\n"
++        if (stage == Stage::Geometry || stage == Stage::TessellationControl ||
++            stage == Stage::TessellationEval) {
++            header += fmt::format("var<private> in_position: array<vec4<f32>, {}>;\n",
++                                  stage == Stage::Geometry ? 6 : options.input_vertices);
++            header += "var<private> v_invocation_id: u32;\n"
 +                      "var<private> v_primitive_id: u32;\n";
++        }
++        if (stage == Stage::TessellationControl || stage == Stage::TessellationEval) {
++            for (size_t index = 0; index < info.uses_patches.size(); ++index) {
++                if (info.uses_patches[index]) {
++                    header += fmt::format("var<private> patch_attr{}: vec4<f32>;\n", index);
++                }
++            }
++            header += "var<private> tess_outer: array<f32, 4>;\n"
++                      "var<private> tess_inner: array<f32, 2>;\n"
++                      "var<private> v_tess_coord: vec3<f32>;\n";
 +        }
          break;
      case Stage::Fragment:
          header += "var<private> v_frag_coord: vec4<f32>;\n"
-@@ -416,8 +428,12 @@ void EmitContext::DefineInterface() {
+@@ -416,8 +443,14 @@ void EmitContext::DefineInterface() {
      }
      for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
          if (info.loads.Generic(index)) {
 -            header += fmt::format("var<private> in_attr{}: vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n",
 -                                  index);
-+            if (stage == Stage::Geometry) {
-+                header += fmt::format("var<private> in_attr{}: array<vec4<f32>, 6>;\n", index);
++            if (stage == Stage::Geometry || stage == Stage::TessellationControl ||
++                stage == Stage::TessellationEval) {
++                header += fmt::format("var<private> in_attr{}: array<vec4<f32>, {}>;\n", index,
++                                      stage == Stage::Geometry ? 6 : options.input_vertices);
 +            } else {
 +                header += fmt::format(
 +                    "var<private> in_attr{}: vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n", index);
@@ -271,9 +817,9 @@ index 644fe1e06b..c5709a4a1d 100644
          }
          if (info.stores.Generic(index)) {
              header += fmt::format("var<private> out_attr{}: vec4<f32>;\n", index);
-@@ -426,31 +442,38 @@ void EmitContext::DefineInterface() {
+@@ -426,31 +459,38 @@ void EmitContext::DefineInterface() {
  }
- 
+
  void EmitContext::DefineHelperFunctions() {
 -    header += "fn fimm(v: u32) -> f32 { return bitcast<f32>(v); }\n"
 -              "fn ftou(v: f32) -> u32 { return bitcast<u32>(v); }\n"
@@ -335,7 +881,7 @@ index 644fe1e06b..c5709a4a1d 100644
      if (info.uses_fswzadd) {
          header += "var<private> FSWZ_A: array<f32, 4> = array<f32, 4>(-1.0, 1.0, -1.0, 0.0);\n"
                    "var<private> FSWZ_B: array<f32, 4> = array<f32, 4>(-1.0, -1.0, 1.0, -1.0);\n";
-@@ -505,11 +528,16 @@ std::string EmitContext::Finish(const IR::Program& program) {
+@@ -505,11 +545,16 @@ std::string EmitContext::Finish(const IR::Program& program) {
                       "return max(vec4<f32>(vec3<f32>(f32(x), f32(y), f32(z)) / 511.0, f32(w)),"
                       " vec4<f32>(-1.0));\n}\n";
          }
@@ -357,7 +903,7 @@ index 644fe1e06b..c5709a4a1d 100644
              for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
                  if (info.loads.Generic(index)) {
                      entry += fmt::format("in_attr{} = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n", index);
-@@ -538,15 +566,18 @@ std::string EmitContext::Finish(const IR::Program& program) {
+@@ -538,15 +583,18 @@ std::string EmitContext::Finish(const IR::Program& program) {
              if (pulled.enabled) {
                  const PulledBuffer& buffer{options.pulled_buffers[pulled.buffer]};
                  if (options.attribute_snorm_1010102[index]) {
@@ -383,7 +929,7 @@ index 644fe1e06b..c5709a4a1d 100644
                  }
              }
              if (options.attribute_snorm_1010102[index]) {
-@@ -559,13 +590,17 @@ std::string EmitContext::Finish(const IR::Program& program) {
+@@ -559,13 +607,17 @@ std::string EmitContext::Finish(const IR::Program& program) {
              }
          }
          entry += "main_body();\nvar output: VSOutput;\nvar pos = v_position;\n";
@@ -407,10 +953,12 @@ index 644fe1e06b..c5709a4a1d 100644
          for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
              if (info.stores.Generic(index)) {
                  entry += fmt::format("output.out{} = out_attr{};\n", index, index);
-@@ -653,6 +688,15 @@ fn rect_cross(a: vec2<f32>, b: vec2<f32>) -> f32 { return a.x*b.y - a.y*b.x; }
+@@ -653,6 +705,17 @@ fn rect_cross(a: vec2<f32>, b: vec2<f32>) -> f32 { return a.x*b.y - a.y*b.x; }
          }
          break;
      }
++    case Stage::TessellationControl:
++    case Stage::TessellationEval:
 +    case Stage::Geometry: {
 +        entry += "fn run() {\n";
 +        if (program.local_memory_size > 0) {
@@ -423,7 +971,7 @@ index 644fe1e06b..c5709a4a1d 100644
      case Stage::Fragment: {
          entry += "struct FSInput {\n@builtin(position) frag_coord: vec4<f32>,\n"
                   "@builtin(front_facing) front_facing: bool,\n";
-@@ -738,7 +782,37 @@ fn rect_cross(a: vec2<f32>, b: vec2<f32>) -> f32 { return a.x*b.y - a.y*b.x; }
+@@ -738,7 +801,37 @@ fn rect_cross(a: vec2<f32>, b: vec2<f32>) -> f32 { return a.x*b.y - a.y*b.x; }
      default:
          break;
      }
@@ -460,10 +1008,10 @@ index 644fe1e06b..c5709a4a1d 100644
 +    renamed.append(result, offset);
 +    return renamed;
  }
- 
+
  } // namespace Shader::Backend::WGSL
 diff --git a/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp b/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
-index 9bcb6836e9..571905daec 100644
+index 9bcb6836e9..05f16be07a 100644
 --- a/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
 +++ b/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
 @@ -105,6 +105,85 @@ void ConvertRectangleIndices(Maxwell::PrimitiveTopology topology, std::span<cons
@@ -550,7 +1098,7 @@ index 9bcb6836e9..571905daec 100644
 +    }
 +}
  } // Anonymous namespace
- 
+
  Buffer::Buffer(BufferCacheRuntime& runtime_, DAddr cpu_addr_, u64 size_bytes_, bool)
 @@ -235,11 +314,12 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
                                           u32 first, u32 count, const wgpu::Buffer& buffer,
@@ -561,33 +1109,35 @@ index 9bcb6836e9..571905daec 100644
 -                          (topology == PrimitiveTopology::TriangleStrip ||
 -                           (rectangle_restart && topology == PrimitiveTopology::Triangles)));
 -    if (!convert || (cpu_addr == 0 && (!rectangle_draw || rectangle_inline_indices.empty()))) {
++    const bool expanded = rectangle_draw || geometry_draw || tessellation_draw;
 +    const bool convert =
-+        geometry_draw || NeedsConversion(topology) || index_size == 1 ||
++        geometry_draw || tessellation_draw || NeedsConversion(topology) || index_size == 1 ||
 +        (rectangle_draw && (topology == PrimitiveTopology::TriangleStrip ||
 +                            (rectangle_restart && topology == PrimitiveTopology::Triangles)));
-+    if (!convert || (cpu_addr == 0 &&
-+                     ((!rectangle_draw && !geometry_draw) || rectangle_inline_indices.empty()))) {
++    if (!convert || (cpu_addr == 0 && (!expanded || rectangle_inline_indices.empty()))) {
          index.buffer = buffer;
          index.offset = offset;
          index.size = Common::AlignUp(size, 4);
-@@ -275,7 +355,10 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
+@@ -275,7 +355,12 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
              break;
          }
      }
 -    if (rectangle_draw) {
-+    if (geometry_draw) {
++    if (tessellation_draw) {
++        index_scratch = indices;
++    } else if (geometry_draw) {
 +        ConvertGeometryIndices(topology, indices, index_scratch, rectangle_restart,
 +                               rectangle_restart_index);
 +    } else if (rectangle_draw) {
          ConvertRectangleIndices(topology, indices, index_scratch, rectangle_restart,
                                  rectangle_restart_index);
      } else {
-@@ -286,14 +369,15 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
+@@ -286,14 +371,14 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
          index_scratch.push_back(0);
      }
      const auto bytes = std::as_bytes(std::span(index_scratch));
 -    auto& ring = rectangle_draw ? rectangle_index_ring : index_ring;
-+    auto& ring = rectangle_draw || geometry_draw ? rectangle_index_ring : index_ring;
++    auto& ring = expanded ? rectangle_index_ring : index_ring;
      index.offset = ring.Push(
          std::span<const u8>(reinterpret_cast<const u8*>(bytes.data()), bytes.size()));
      index.buffer = ring.Buffer();
@@ -595,12 +1145,11 @@ index 9bcb6836e9..571905daec 100644
      index.format = wgpu::IndexFormat::Uint32;
      index.converted = true;
 -    index.count = rectangle_draw ? rectangle_count : static_cast<u32>(index_scratch.size());
-+    index.count =
-+        rectangle_draw || geometry_draw ? rectangle_count : static_cast<u32>(index_scratch.size());
++    index.count = expanded ? rectangle_count : static_cast<u32>(index_scratch.size());
  }
- 
+
  void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 first, u32 count) {
-@@ -301,7 +385,9 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
+@@ -301,7 +386,9 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
      for (u32 i = 0; i < count; ++i) {
          vertices[i] = first + i;
      }
@@ -611,12 +1160,13 @@ index 9bcb6836e9..571905daec 100644
          ConvertRectangleIndices(topology, vertices, index_scratch, false, 0);
      } else {
          ConvertIndices(topology, vertices, index_scratch);
-@@ -311,14 +397,15 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
+@@ -311,14 +398,15 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
          index_scratch.push_back(first);
      }
      const auto bytes = std::as_bytes(std::span(index_scratch));
 -    auto& ring = rectangle_draw ? rectangle_index_ring : index_ring;
-+    auto& ring = rectangle_draw || geometry_draw ? rectangle_index_ring : index_ring;
++    const bool expanded = rectangle_draw || geometry_draw || tessellation_draw;
++    auto& ring = expanded ? rectangle_index_ring : index_ring;
      index.offset = ring.Push(
          std::span<const u8>(reinterpret_cast<const u8*>(bytes.data()), bytes.size()));
      index.buffer = ring.Buffer();
@@ -624,38 +1174,46 @@ index 9bcb6836e9..571905daec 100644
      index.format = wgpu::IndexFormat::Uint32;
      index.converted = true;
 -    index.count = rectangle_draw ? rectangle_count : static_cast<u32>(index_scratch.size());
-+    index.count =
-+        rectangle_draw || geometry_draw ? rectangle_count : static_cast<u32>(index_scratch.size());
++    index.count = expanded ? rectangle_count : static_cast<u32>(index_scratch.size());
  }
- 
+
  void BufferCacheRuntime::BindVertexBuffer(u32 binding, const wgpu::Buffer& buffer, u32 offset,
 diff --git a/src/video_core/renderer_webgpu/wgpu_buffer_cache.h b/src/video_core/renderer_webgpu/wgpu_buffer_cache.h
-index d89bcb9f65..3530c0ccab 100644
+index d89bcb9f65..0654d34ce4 100644
 --- a/src/video_core/renderer_webgpu/wgpu_buffer_cache.h
 +++ b/src/video_core/renderer_webgpu/wgpu_buffer_cache.h
-@@ -183,6 +183,7 @@ public:
+@@ -183,6 +183,8 @@ public:
      u32 num_vertex_bindings{};
      IndexBinding index;
      bool rectangle_draw{};
 +    bool geometry_draw{};
++    bool tessellation_draw{};
      bool rectangle_restart{};
      u32 rectangle_restart_index{};
      std::span<const u8> rectangle_inline_indices;
 diff --git a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
-index ba40404856..cbda4b29ba 100644
+index ba40404856..955336941a 100644
 --- a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
 +++ b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
-@@ -107,6 +107,9 @@ Shader::RuntimeInfo MakeRuntimeInfo(const GraphicsPipelineKey& key, const Shader
+@@ -107,6 +107,17 @@ Shader::RuntimeInfo MakeRuntimeInfo(const GraphicsPipelineKey& key, const Shader
          std::ranges::transform(key.state.attributes, info.generic_input_types.begin(),
                                 &CastAttributeType);
          break;
 +    case Shader::Stage::Geometry:
 +        info.convert_depth_mode = gl_ndc;
 +        break;
++    case Shader::Stage::TessellationEval:
++        info.convert_depth_mode = gl_ndc;
++        info.tess_primitive =
++            static_cast<Shader::TessPrimitive>(key.state.tessellation_primitive.Value());
++        info.tess_spacing =
++            static_cast<Shader::TessSpacing>(key.state.tessellation_spacing.Value());
++        info.tess_clockwise = key.state.tessellation_clockwise != 0;
++        break;
      case Shader::Stage::Fragment:
          info.alpha_test_func = MaxwellToCompareFunction(
              key.state.UnpackComparisonOp(key.state.alpha_test_func.Value()));
-@@ -137,6 +140,14 @@ Shader::RuntimeInfo MakeRuntimeInfo(const GraphicsPipelineKey& key, const Shader
+@@ -137,6 +148,14 @@ Shader::RuntimeInfo MakeRuntimeInfo(const GraphicsPipelineKey& key, const Shader
      case Maxwell::PrimitiveTopology::LineStrip:
          info.input_topology = Shader::InputTopology::Lines;
          break;
@@ -670,36 +1228,69 @@ index ba40404856..cbda4b29ba 100644
      default:
          info.input_topology = Shader::InputTopology::Triangles;
          break;
-@@ -522,7 +533,7 @@ GraphicsPipeline::GraphicsPipeline(PipelineCache& cache_, const GraphicsPipeline
+@@ -290,8 +309,7 @@ wgpu::ShaderModule MakeModule(const std::string& code, u64 hash) {
+     wgpu::ShaderModuleDescriptor desc{};
+     desc.nextInChain = &wgsl;
+     wgpu::ShaderModule module = Thread::Get().device.CreateShaderModule(&desc);
+-    static u32 dumped_modules = 0; // TEMP-DEBUG
+-    if (dumped_modules++ < 6 || Settings::values.dump_guest_shaders.GetValue()) {
++    if (Settings::values.dump_guest_shaders.GetValue()) {
+         LOG_INFO(Render, "WGSL {:016x}:\n{}", hash, code);
+     }
+     module.GetCompilationInfo(
+@@ -380,6 +398,8 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
+     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+     graphics_key.fill_rectangle = MaxwellToWGPU::IsRectangleDraw(
+         maxwell3d->regs, maxwell3d->draw_manager.draw_state.topology);
++    graphics_key.tessellation_points = maxwell3d->regs.tessellation.params.output_primitives ==
++                                       Maxwell::Tessellation::OutputPrimitives::Points;
+     const auto lookup = [&]() {
+         auto [it, is_new] = graphics_cache.try_emplace(graphics_key);
+         pipeline_stats.lookups.fetch_add(1, std::memory_order_relaxed);
+@@ -521,8 +541,9 @@ GraphicsPipeline::GraphicsPipeline(PipelineCache& cache_, const GraphicsPipeline
+         const auto& geometry = environments.envs[4];
          skip_geometry = geometry.SPH().common0.geometry_passthrough != 0;
      }
-     const bool unsupported = key.unique_hashes[2] != 0 || key.unique_hashes[3] != 0 ||
+-    const bool unsupported = key.unique_hashes[2] != 0 || key.unique_hashes[3] != 0 ||
 -                             (key.unique_hashes[4] != 0 && !skip_geometry);
++    const bool unsupported = (key.unique_hashes[2] != 0 && !IsTessellation()) ||
++                             (IsTessellation() && (IsGeometry() || key.fill_rectangle)) ||
 +                             (IsGeometry() && key.fill_rectangle);
      if (unsupported) {
          LOG_WARNING(Render, "WebGPU: skipping pipeline {:016x} with tessellation/geometry stages",
                      key.Hash());
-@@ -533,7 +544,7 @@ GraphicsPipeline::GraphicsPipeline(PipelineCache& cache_, const GraphicsPipeline
- 
+@@ -533,7 +554,10 @@ GraphicsPipeline::GraphicsPipeline(PipelineCache& cache_, const GraphicsPipeline
+
  u32 GraphicsPipeline::CbufLimit(size_t stage) const {
      return cache.max_uniform_buffers - 1 -
 -           (stage == 0 && (!pulled_buffers.empty() || key.fill_rectangle) ? 1 : 0);
-+           (stage == 0 && (!pulled_buffers.empty() || key.fill_rectangle || IsGeometry()) ? 1 : 0);
++           (stage == 0 && (!pulled_buffers.empty() || key.fill_rectangle || IsGeometry() ||
++                           IsTessellation())
++                ? 1
++                : 0);
  }
- 
+
  bool GraphicsPipeline::SupportsRectangle() {
-@@ -638,8 +649,8 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+@@ -638,8 +662,8 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
                  pulled_buffers.push_back(buffer);
              }
          }
 -        if (key.fill_rectangle) {
 -            if (!SupportsRectangle()) {
-+        if (key.fill_rectangle || IsGeometry()) {
++        if (key.fill_rectangle || IsGeometry() || IsTessellation()) {
 +            if (key.fill_rectangle && !SupportsRectangle()) {
                  return false;
              }
              pulled_buffers.clear();
-@@ -682,6 +693,10 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+@@ -662,6 +686,7 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+         };
+
+         std::array<std::string, NUM_STAGES> codes;
++        std::string tessellation_code;
+         Shader::Backend::Bindings binding;
+         const Shader::IR::Program* previous_stage{};
+         size_t kind_index{};
+@@ -682,6 +707,17 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
              options.has_depth_target = variant_key.depth_format != wgpu::TextureFormat::Undefined;
              options.max_samplers = cache.max_samplers;
              options.max_uniform_buffers = CbufLimit(stage);
@@ -707,13 +1298,20 @@ index ba40404856..cbda4b29ba 100644
 +                options.function_prefix = stage == 0 ? "s0_" : "s4_";
 +                options.shared_declarations = stage == 0;
 +            }
++            if (IsTessellation() && stage <= 2) {
++                options.function_prefix = stage == 0 ? "s0_" : stage == 1 ? "s2_" : "s3_";
++                options.shared_declarations = stage != 1;
++                options.input_vertices = stage == 1 ? PatchSize()
++                                                   : key.unique_hashes[2] ? programs[2].invocations
++                                                                         : PatchSize();
++            }
              if (program.stage == Shader::Stage::VertexB && key.unique_hashes[5] != 0) {
                  options.output_interpolation = programs[5].info.interpolation;
              }
-@@ -713,6 +728,24 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+@@ -713,6 +749,52 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
              previous_stage = &program;
          }
- 
+
 +        if (IsGeometry()) {
 +            auto& geometry = programs[4];
 +            const auto runtime = MakeRuntimeInfo(key, geometry, &programs[1]);
@@ -731,25 +1329,65 @@ index ba40404856..cbda4b29ba 100644
 +            codes[0] += codes[3] + Shader::Backend::WGSL::EmitGeometryEntry(programs[1], geometry,
 +                                                                            runtime, options);
 +        }
++        if (IsTessellation()) {
++            const auto* control = key.unique_hashes[2] ? &programs[2] : nullptr;
++            if (control && (control->invocations == 0 || control->invocations > 32)) {
++                return false;
++            }
++            const auto runtime =
++                MakeRuntimeInfo(key, programs[3], control ? control : &programs[1]);
++            Options options;
++            options.output_interpolation = programs[5].info.interpolation;
++            const u32 mode = key.tessellation_points ? 0u : key.state.polygon_mode.Value();
++            u32 attributes{};
++            u32 patches{};
++            for (size_t index = 0; index < Shader::IR::NUM_GENERICS; ++index) {
++                attributes += programs[3].info.loads.Generic(index);
++            }
++            for (size_t index = 0; index < programs[3].info.uses_patches.size(); ++index) {
++                patches += programs[3].info.uses_patches[index] ||
++                           (control && control->info.uses_patches[index]);
++            }
++            const u32 control_points = control ? control->invocations : PatchSize();
++            tessellation_patch_stride = (control_points * (attributes + 1) + patches) * 16 + 32;
++            tessellation_code = codes[0] + codes[1] + Shader::Backend::WGSL::EmitTessellationEntry(
++                                             programs[1], control, programs[3], runtime, options,
++                                             PatchSize(), mode, true);
++            codes[0] = codes[2] + Shader::Backend::WGSL::EmitTessellationEntry(
++                                    programs[1], control, programs[3], runtime, options,
++                                    PatchSize(), mode, false);
++        }
 +
          auto& device = Thread::Get().device;
          // Bind group layout, in the order descriptors are pushed by Configure.
          std::vector<wgpu::BindGroupLayoutEntry> entries;
-@@ -803,6 +836,24 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+@@ -723,7 +805,8 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+                 continue;
+             }
+             const Shader::Info& info{stage_infos[stage]};
+-            const auto visibility = StageVisibility(stage);
++            const auto visibility =
++                IsTessellation() && stage < 2 ? wgpu::ShaderStage::Compute : StageVisibility(stage);
+             const u32 packed_cbuf_first{Shader::Backend::WGSL::PackedCbufFirst(info, CbufLimit(stage))};
+             for (u32 desc_index = 0; desc_index < info.constant_buffer_descriptors.size(); ++desc_index) {
+                 const auto& desc{info.constant_buffer_descriptors[desc_index]};
+@@ -803,13 +886,34 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
              }
          }
          wgpu::BindGroupLayoutDescriptor layout_desc{};
-+        if (IsGeometry()) {
++        if (IsGeometry() || IsTessellation()) {
 +            u32 storage = static_cast<u32>(pulled_buffers.size()) + 1;
 +            u32 uniforms = 2;
 +            for (const auto& entry : entries) {
-+                if (entry.visibility != wgpu::ShaderStage::Vertex) {
++                if (entry.visibility != wgpu::ShaderStage::Vertex &&
++                    entry.visibility != wgpu::ShaderStage::Compute) {
 +                    continue;
 +                }
 +                storage += entry.buffer.type == wgpu::BufferBindingType::ReadOnlyStorage ||
 +                           entry.buffer.type == wgpu::BufferBindingType::Storage;
 +                uniforms += entry.buffer.type == wgpu::BufferBindingType::Uniform;
 +            }
++            storage += IsTessellation() ? 3 : 0;
 +            if (storage > cache.max_storage_buffers || uniforms > cache.max_uniform_buffers) {
 +                LOG_WARNING(Render,
 +                            "WebGPU: geometry pipeline {:016x} exceeds vertex binding limits",
@@ -760,32 +1398,101 @@ index ba40404856..cbda4b29ba 100644
          layout_desc.entryCount = entries.size();
          layout_desc.entries = entries.data();
          variant.layout = device.CreateBindGroupLayout(&layout_desc);
-@@ -817,9 +868,9 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+
+         wgpu::BindGroupLayoutEntry draw_entry{};
+         draw_entry.binding = 0;
+-        draw_entry.visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment;
++        draw_entry.visibility =
++            wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment | wgpu::ShaderStage::Compute;
+         draw_entry.buffer.type = wgpu::BufferBindingType::Uniform;
+         draw_entry.buffer.hasDynamicOffset = true;
+         draw_entry.buffer.minBindingSize = sizeof(DrawInfo);
+@@ -817,23 +921,25 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
          draw_layout_desc.entryCount = 1;
          draw_layout_desc.entries = &draw_entry;
          const wgpu::BindGroupLayout draw_layout = device.CreateBindGroupLayout(&draw_layout_desc);
 -        if (!pulled_buffers.empty() || key.fill_rectangle) {
 -            std::vector<wgpu::BindGroupLayoutEntry> pulled_entries(pulled_buffers.size() + 1 +
 -                                                                  (key.fill_rectangle ? 1 : 0));
-+        if (!pulled_buffers.empty() || key.fill_rectangle || IsGeometry()) {
++        if (!pulled_buffers.empty() || key.fill_rectangle || IsGeometry() || IsTessellation()) {
 +            std::vector<wgpu::BindGroupLayoutEntry> pulled_entries(
-+                pulled_buffers.size() + 1 + (key.fill_rectangle || IsGeometry() ? 1 : 0));
++                pulled_buffers.size() + 1 +
++                (key.fill_rectangle || IsGeometry() || IsTessellation() ? 1 : 0));
              for (u32 i = 0; i < pulled_buffers.size(); ++i) {
                  pulled_entries[i].binding = i;
-                 pulled_entries[i].visibility = wgpu::ShaderStage::Vertex;
-@@ -830,7 +881,7 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
-             bases.visibility = wgpu::ShaderStage::Vertex;
+-                pulled_entries[i].visibility = wgpu::ShaderStage::Vertex;
++                pulled_entries[i].visibility =
++                    wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Compute;
+                 pulled_entries[i].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+             }
+             auto& bases = pulled_entries[pulled_buffers.size()];
+             bases.binding = Shader::Backend::WGSL::MAX_PULLED_BUFFERS;
+-            bases.visibility = wgpu::ShaderStage::Vertex;
++            bases.visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Compute;
              bases.buffer.type = wgpu::BufferBindingType::Uniform;
              bases.buffer.minBindingSize = Shader::Backend::WGSL::MAX_PULLED_BUFFERS * 4;
 -            if (key.fill_rectangle) {
-+            if (key.fill_rectangle || IsGeometry()) {
++            if (key.fill_rectangle || IsGeometry() || IsTessellation()) {
                  auto& indices = pulled_entries.back();
                  indices.binding = Shader::Backend::WGSL::MAX_PULLED_BUFFERS + 1;
-                 indices.visibility = wgpu::ShaderStage::Vertex;
-@@ -905,6 +956,14 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+-                indices.visibility = wgpu::ShaderStage::Vertex;
++                indices.visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Compute;
+                 indices.buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+             }
+             wgpu::BindGroupLayoutDescriptor pulled_desc{};
+@@ -841,10 +947,42 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
+             pulled_desc.entries = pulled_entries.data();
+             variant.pulled_layout = device.CreateBindGroupLayout(&pulled_desc);
+         }
+-        const std::array<wgpu::BindGroupLayout, 3> layouts{variant.layout, draw_layout,
+-                                                           variant.pulled_layout};
++        std::array<wgpu::BindGroupLayout, 4> layouts{variant.layout, draw_layout,
++                                                     variant.pulled_layout};
+         wgpu::PipelineLayoutDescriptor pipeline_layout_desc{};
+-        pipeline_layout_desc.bindGroupLayoutCount = variant.pulled_layout ? 3 : 2;
++        if (IsTessellation()) {
++            std::array<wgpu::BindGroupLayoutEntry, 3> tess_entries{};
++            for (u32 index = 0; index < tess_entries.size(); ++index) {
++                tess_entries[index].binding = index;
++                tess_entries[index].visibility = wgpu::ShaderStage::Compute;
++                tess_entries[index].buffer.type = wgpu::BufferBindingType::Storage;
++            }
++            wgpu::BindGroupLayoutDescriptor tess_desc{};
++            tess_desc.entryCount = tess_entries.size();
++            tess_desc.entries = tess_entries.data();
++            variant.tessellation_write_layout = device.CreateBindGroupLayout(&tess_desc);
++            for (auto& entry : tess_entries) {
++                entry.visibility = wgpu::ShaderStage::Vertex;
++                entry.buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
++            }
++            tess_desc.entryCount = 2;
++            variant.tessellation_read_layout = device.CreateBindGroupLayout(&tess_desc);
++            layouts[3] = variant.tessellation_write_layout;
++            pipeline_layout_desc.bindGroupLayoutCount = layouts.size();
++            pipeline_layout_desc.bindGroupLayouts = layouts.data();
++            const auto compute_layout = device.CreatePipelineLayout(&pipeline_layout_desc);
++            wgpu::ComputePipelineDescriptor compute_desc{};
++            compute_desc.layout = compute_layout;
++            compute_desc.compute.module = MakeModule(tessellation_code, key.unique_hashes[3]);
++            compute_desc.compute.entryPoint = "tess_main";
++            variant.tessellation_pipeline = device.CreateComputePipeline(&compute_desc);
++            compute_desc.compute.entryPoint = "tess_finish";
++            variant.tessellation_finish = device.CreateComputePipeline(&compute_desc);
++            layouts[3] = variant.tessellation_read_layout;
++        }
++        pipeline_layout_desc.bindGroupLayoutCount = IsTessellation()        ? 4
++                                                    : variant.pulled_layout ? 3
++                                                                            : 2;
+         pipeline_layout_desc.bindGroupLayouts = layouts.data();
+         const wgpu::PipelineLayout pipeline_layout = device.CreatePipelineLayout(&pipeline_layout_desc);
+
+@@ -905,6 +1043,17 @@ bool GraphicsPipeline::Translate(const VariantKey& variant_key, Variant& variant
          const auto& dynamic = state.dynamic_state;
          desc.primitive.topology = key.fill_rectangle ? wgpu::PrimitiveTopology::TriangleList
                                                     : MaxwellToWGPU::Topology(state.topology);
++        if (IsTessellation()) {
++            desc.primitive.topology = TessellationTopology();
++        }
 +        if (IsGeometry()) {
 +            const auto topology = programs[4].output_topology;
 +            desc.primitive.topology = topology == Shader::OutputTopology::TriangleStrip
@@ -797,17 +1504,70 @@ index ba40404856..cbda4b29ba 100644
          if (desc.primitive.topology == wgpu::PrimitiveTopology::TriangleStrip ||
              desc.primitive.topology == wgpu::PrimitiveTopology::LineStrip) {
              desc.primitive.stripIndexFormat = variant_key.strip_index_format;
+@@ -1192,6 +1341,10 @@ bool GraphicsPipeline::Configure(bool is_indexed) {
+     }
+     render_pipeline = *variant->pipeline;
+     pulled_layout = variant->pulled_layout;
++    tessellation_pipeline = variant->tessellation_pipeline;
++    tessellation_finish = variant->tessellation_finish;
++    tessellation_write_layout = variant->tessellation_write_layout;
++    tessellation_read_layout = variant->tessellation_read_layout;
+
+     // Resource bindings, in layout order.
+     auto& descriptors = runtime.Descriptors();
 diff --git a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.h b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.h
-index 78b0bf5ee4..b00c6fe9c3 100644
+index 78b0bf5ee4..404f7a3383 100644
 --- a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.h
 +++ b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.h
-@@ -96,6 +96,18 @@ public:
- 
+@@ -38,6 +38,7 @@ using Shader::Backend::WGSL::TextureSampleKind;
+
+ struct GraphicsPipelineKey {
+     u64 fill_rectangle{};
++    u64 tessellation_points{};
+     std::array<u64, 6> unique_hashes;
+     Vulkan::FixedPipelineState state;
+
+@@ -45,7 +46,8 @@ struct GraphicsPipelineKey {
+     bool operator==(const GraphicsPipelineKey& rhs) const noexcept;
+
+     size_t Size() const noexcept {
+-        return sizeof(fill_rectangle) + sizeof(unique_hashes) + state.Size();
++        return sizeof(fill_rectangle) + sizeof(tessellation_points) + sizeof(unique_hashes) +
++               state.Size();
+     }
+ };
+
+@@ -96,6 +98,42 @@ public:
+
      bool SupportsRectangle();
- 
+
 +    bool IsGeometry() const {
 +        return key.unique_hashes[4] != 0 && !skip_geometry;
 +    }
++
++    bool IsTessellation() const {
++        return key.unique_hashes[3] != 0;
++    }
++
++    u32 PatchSize() const {
++        return key.state.patch_control_points_minus_one + 1;
++    }
++
++    wgpu::PrimitiveTopology TessellationTopology() const {
++        if (key.tessellation_points || key.state.polygon_mode == 0) {
++            return wgpu::PrimitiveTopology::PointList;
++        }
++        if (key.state.polygon_mode == 1 || key.state.tessellation_primitive == 0) {
++            return wgpu::PrimitiveTopology::LineList;
++        }
++        return wgpu::PrimitiveTopology::TriangleList;
++    }
++
++    wgpu::ComputePipeline tessellation_pipeline;
++    u32 tessellation_patch_stride{};
++    wgpu::ComputePipeline tessellation_finish;
++    wgpu::BindGroupLayout tessellation_write_layout;
++    wgpu::BindGroupLayout tessellation_read_layout;
 +
 +    u32 GeometryInputVertices() const {
 +        return geometry_input_vertices;
@@ -820,26 +1580,48 @@ index 78b0bf5ee4..b00c6fe9c3 100644
      /// Resources resolved by the last Configure call.
      wgpu::RenderPipeline render_pipeline;
      /// Layout of the pulled vertex buffer group, null when every buffer has a vertex slot.
-@@ -154,6 +166,8 @@ private:
+@@ -138,6 +176,10 @@ private:
+         std::shared_ptr<wgpu::RenderPipeline> pipeline = std::make_shared<wgpu::RenderPipeline>();
+         wgpu::BindGroupLayout layout;
+         wgpu::BindGroupLayout pulled_layout;
++        wgpu::ComputePipeline tessellation_pipeline;
++        wgpu::ComputePipeline tessellation_finish;
++        wgpu::BindGroupLayout tessellation_write_layout;
++        wgpu::BindGroupLayout tessellation_read_layout;
+         std::vector<bool> storage_writable; ///< Per storage binding, in layout order
+         bool failed{};
+     };
+@@ -154,6 +196,8 @@ private:
      Variant* FindVariant(const VariantKey& variant_key);
- 
+
      PipelineCache& cache;
 +    u32 geometry_input_vertices{1};
 +    u32 geometry_output_vertices{};
      GraphicsPipelineKey key;
      VideoCommon::ShaderCache::GraphicsEnvironments environments;
- 
+
 diff --git a/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp b/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
-index 7d2f1366d4..16e19604ba 100644
+index 7d2f1366d4..cb3a58521a 100644
 --- a/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
 +++ b/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp
-@@ -117,21 +117,24 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -72,7 +72,8 @@ void RasterizerWebGPU::BindDrawInfoGroup() {
+     auto& device = Thread::Get().device;
+     wgpu::BindGroupLayoutEntry entry{};
+     entry.binding = 0;
+-    entry.visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment;
++    entry.visibility =
++        wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment | wgpu::ShaderStage::Compute;
+     entry.buffer.type = wgpu::BufferBindingType::Uniform;
+     entry.buffer.hasDynamicOffset = true;
+     entry.buffer.minBindingSize = sizeof(Shader::Backend::WGSL::DrawInfo);
+@@ -117,21 +118,26 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
          return;
      }
      const bool rectangle = pipeline->IsRectangle();
 -    if (rectangle && indirect) {
 +    const bool geometry = pipeline->IsGeometry();
-+    const bool emulated = rectangle || geometry;
++    const bool tessellation = pipeline->IsTessellation();
++    const bool emulated = rectangle || geometry || tessellation;
 +    if (emulated && indirect) {
          static bool logged = false;
          if (!logged) {
@@ -852,6 +1634,7 @@ index 7d2f1366d4..16e19604ba 100644
      std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
      buffer_cache_runtime.rectangle_draw = rectangle;
 +    buffer_cache_runtime.geometry_draw = geometry;
++    buffer_cache_runtime.tessellation_draw = tessellation;
      buffer_cache_runtime.rectangle_restart = maxwell3d->regs.primitive_restart.enabled != 0;
      buffer_cache_runtime.rectangle_restart_index = maxwell3d->regs.primitive_restart.index;
      buffer_cache_runtime.rectangle_inline_indices =
@@ -862,12 +1645,12 @@ index 7d2f1366d4..16e19604ba 100644
      if (!pipeline->Configure(is_indexed)) {
          return;
      }
-@@ -149,15 +152,15 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -149,15 +155,16 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
      u32 first = is_indexed ? draw_state.index_buffer.first : draw_state.vertex_buffer.first;
      s32 base_vertex = is_indexed ? static_cast<s32>(draw_state.base_index) : 0;
      const bool needs_conversion =
 -        MaxwellToWGPU::NeedsIndexConversion(draw_state.topology) ||
-+        geometry || MaxwellToWGPU::NeedsIndexConversion(draw_state.topology) ||
++        geometry || tessellation || MaxwellToWGPU::NeedsIndexConversion(draw_state.topology) ||
          (rectangle && draw_state.topology == Maxwell::PrimitiveTopology::TriangleStrip);
      if (indirect && needs_conversion) {
          // Rewritten index lists cannot follow parameters the GPU wrote.
@@ -876,12 +1659,13 @@ index 7d2f1366d4..16e19604ba 100644
      if (!is_indexed && needs_conversion) {
 -        if (draw_state.topology != Maxwell::PrimitiveTopology::Quads &&
 -            draw_state.topology != Maxwell::PrimitiveTopology::QuadStrip) {
-+        if (geometry || (draw_state.topology != Maxwell::PrimitiveTopology::Quads &&
-+                         draw_state.topology != Maxwell::PrimitiveTopology::QuadStrip)) {
++        if (geometry || tessellation ||
++            (draw_state.topology != Maxwell::PrimitiveTopology::Quads &&
++             draw_state.topology != Maxwell::PrimitiveTopology::QuadStrip)) {
              runtime.BindQuadIndexBuffer(draw_state.topology, draw_state.vertex_buffer.first, count);
          }
          indexed = true;
-@@ -167,8 +170,9 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -167,8 +174,9 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
          count = runtime.index.count;
          first = 0;
      }
@@ -893,7 +1677,7 @@ index 7d2f1366d4..16e19604ba 100644
          static bool logged = false;
          if (!logged) {
              LOG_WARNING(Render, "WebGPU: skipping fill-rectangle index conversion without CPU data");
-@@ -202,7 +206,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -202,7 +210,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
      info.render_area = {width, height, 0.0f, 0.0f};
      info.base_vertex = static_cast<u32>(base_vertex);
      info.base_instance = draw_state.base_instance;
@@ -902,7 +1686,54 @@ index 7d2f1366d4..16e19604ba 100644
          info.padding = first;
          if (indexed) {
              info.render_area[2] = runtime.index.format == wgpu::IndexFormat::Uint16 ? 2.0f : 4.0f;
-@@ -271,7 +275,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -216,6 +224,46 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+         std::swap(min_depth, max_depth);
+         info.depth_flip = 1;
+     }
++    u32 tessellation_patch_count{};
++    if (tessellation) {
++        const u64 patches = static_cast<u64>(count / pipeline->PatchSize()) * instance_count;
++        if (patches == 0) {
++            return;
++        }
++        wgpu::Limits limits{};
++        auto& device = Thread::Get().device;
++        device.GetLimits(&limits);
++        const u64 patch_bytes = patches * pipeline->tessellation_patch_stride;
++        const auto topology = pipeline->TessellationTopology();
++        const u64 per_patch = topology == wgpu::PrimitiveTopology::PointList  ? 4225
++                              : topology == wgpu::PrimitiveTopology::LineList ? 49152
++                                                                              : 24576;
++        const u64 record_bytes = patches * per_patch * 16;
++        const u64 max_bytes =
++            std::min<u64>(limits.maxStorageBufferBindingSize, limits.maxBufferSize);
++        if (patch_bytes > max_bytes || record_bytes > max_bytes ||
++            patches > limits.maxComputeWorkgroupsPerDimension) {
++            LOG_WARNING(Render, "WebGPU: tessellation draw exceeds device buffer/dispatch limits");
++            return;
++        }
++        const auto ensure_buffer = [&](wgpu::Buffer& buffer, u64 bytes, wgpu::BufferUsage usage) {
++            if (!buffer || buffer.GetSize() < bytes) {
++                wgpu::BufferDescriptor desc{};
++                desc.size = std::min(std::bit_ceil(std::max<u64>(bytes, 256)), max_bytes);
++                desc.usage = usage | wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
++                buffer = device.CreateBuffer(&desc);
++            }
++        };
++        ensure_buffer(tessellation_patches, patch_bytes, wgpu::BufferUsage::CopySrc);
++        ensure_buffer(tessellation_records, record_bytes, wgpu::BufferUsage::None);
++        ensure_buffer(tessellation_args, 20,
++                      wgpu::BufferUsage::Indirect | wgpu::BufferUsage::CopySrc);
++        tessellation_patch_count = static_cast<u32>(patches);
++        info.tess_outer = regs.tessellation.lod.outer;
++        std::ranges::copy(regs.tessellation.lod.inner, info.tess_inner.begin());
++        info.tess_draw = {count / pipeline->PatchSize(), instance_count, first,
++                          static_cast<u32>(tessellation_records.GetSize() / 16)};
++    }
+     const u32 draw_offset = uniform_ring.Push(
+         std::span<const u8>(reinterpret_cast<const u8*>(&info), sizeof(info)));
+
+@@ -271,7 +319,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
      // Vertex buffers past WebGPU's slots are read by the shader as storage buffers. Storage
      // bindings start at 256-byte aligned offsets; the shader adds the remainder.
      wgpu::BindGroup pulled_group;
@@ -911,7 +1742,7 @@ index 7d2f1366d4..16e19604ba 100644
          std::array<wgpu::BindGroupEntry, Shader::Backend::WGSL::MAX_PULLED_BUFFERS + 2> entries{};
          std::array<u32, Shader::Backend::WGSL::MAX_PULLED_BUFFERS> bases{};
          const size_t count = pipeline->pulled_buffers.size();
-@@ -298,7 +302,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -298,7 +346,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
          base_entry.offset = uniform_ring.Push(
              std::span<const u8>(reinterpret_cast<const u8*>(bases.data()), sizeof(bases)));
          base_entry.size = sizeof(bases);
@@ -920,7 +1751,7 @@ index 7d2f1366d4..16e19604ba 100644
              auto& index_entry = entries[count + 1];
              index_entry.binding = Shader::Backend::WGSL::MAX_PULLED_BUFFERS + 1;
              index_entry.buffer = indexed ? runtime.index.buffer : uniform_ring.Buffer();
-@@ -310,7 +314,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -310,7 +358,7 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
          }
          wgpu::BindGroupDescriptor desc{};
          desc.layout = pipeline->pulled_layout;
@@ -929,12 +1760,65 @@ index 7d2f1366d4..16e19604ba 100644
          desc.entries = entries.data();
          pulled_group = Thread::Get().device.CreateBindGroup(&desc);
      }
-@@ -460,7 +464,14 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+@@ -403,6 +451,40 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+             }
+         }
+     }
++    wgpu::BindGroup tessellation_group;
++    if (tessellation) {
++        auto& encoder = scheduler.Encoder();
++        encoder.ClearBuffer(tessellation_args, 0, 20);
++        std::array<wgpu::BindGroupEntry, 3> entries{};
++        entries[0].buffer = tessellation_patches;
++        entries[1].buffer = tessellation_records;
++        entries[2].buffer = tessellation_args;
++        for (u32 index = 0; index < entries.size(); ++index) {
++            entries[index].binding = index;
++            entries[index].size = entries[index].buffer.GetSize();
++        }
++        wgpu::BindGroupDescriptor desc{};
++        desc.layout = pipeline->tessellation_write_layout;
++        desc.entryCount = entries.size();
++        desc.entries = entries.data();
++        auto& device = Thread::Get().device;
++        const auto write_group = device.CreateBindGroup(&desc);
++        auto compute = encoder.BeginComputePass();
++        compute.SetPipeline(pipeline->tessellation_pipeline);
++        compute.SetBindGroup(0, bind_group);
++        compute.SetBindGroup(1, draw_info_group, 1, &draw_offset);
++        compute.SetBindGroup(2, pulled_group);
++        compute.SetBindGroup(3, write_group);
++        compute.DispatchWorkgroups(tessellation_patch_count);
++        compute.SetPipeline(pipeline->tessellation_finish);
++        compute.DispatchWorkgroups(1);
++        compute.End();
++        desc.layout = pipeline->tessellation_read_layout;
++        desc.entryCount = 2;
++        tessellation_group = device.CreateBindGroup(&desc);
++        read_buffers.push_back(tessellation_patches.Get());
++        read_buffers.push_back(tessellation_records.Get());
++    }
+     if (scheduler.InRenderPass() && scheduler.PassConflicts(written_buffers, read_buffers)) {
+         scheduler.EndRenderPass();
+     }
+@@ -420,6 +502,9 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
+     if (pulled_group) {
+         pass.SetBindGroup(Shader::Backend::WGSL::PULLED_VERTEX_GROUP, pulled_group);
+     }
++    if (tessellation_group) {
++        pass.SetBindGroup(3, tessellation_group);
++    }
+     // WebGPU rejects draws reading past a vertex binding (and the whole command buffer with
+     // them), while the guest just reads zeros; widen bindings to the buffer end or skip the draw.
+     std::array<u64, Maxwell::NumVertexArrays> vertex_sizes{};
+@@ -460,7 +545,16 @@ void RasterizerWebGPU::DrawCommon(bool is_indexed, u32 instance_count, bool indi
                                    regs.blend_color.a};
      pass.SetBlendConstant(&blend_color);
      pass.SetStencilReference(regs.stencil_front_ref & 0xFF);
 -    if (rectangle) {
-+    if (geometry) {
++    if (tessellation) {
++        pass.DrawIndirect(tessellation_args, 0);
++    } else if (geometry) {
 +        const u64 expanded = static_cast<u64>(count / pipeline->GeometryInputVertices()) *
 +                             pipeline->GeometryOutputVertices();
 +        if (expanded > std::numeric_limits<u32>::max()) {
@@ -945,3 +1829,17 @@ index 7d2f1366d4..16e19604ba 100644
          if (count / 3 > std::numeric_limits<u32>::max() / 6) {
              return;
          }
+diff --git a/src/video_core/renderer_webgpu/wgpu_rasterizer.h b/src/video_core/renderer_webgpu/wgpu_rasterizer.h
+index f80cf8d6f4..cf1a2d0d99 100644
+--- a/src/video_core/renderer_webgpu/wgpu_rasterizer.h
++++ b/src/video_core/renderer_webgpu/wgpu_rasterizer.h
+@@ -132,6 +132,9 @@ private:
+     wgpu::BindGroup draw_info_group;
+     /// Copies of storage ranges a draw writes while reading the same host buffer.
+     wgpu::Buffer shadow_buffer;
++    wgpu::Buffer tessellation_patches;
++    wgpu::Buffer tessellation_records;
++    wgpu::Buffer tessellation_args;
+     AccelerateDMA m_accelerate_dma;
+     /// Samples counted for the guest's occlusion queries. Host results are not read back, so
+     /// every draw made while counting is enabled passes a fixed number of samples.
