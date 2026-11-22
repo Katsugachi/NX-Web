@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { ACTIONS, DEFAULT_BINDINGS } from '../web/bindings.js';
 import { setupInput, Button } from '../web/input.js';
+import { setupTouchscreen, touchscreenPosition } from '../web/touchscreen.js';
 globalThis.window = new EventTarget();
 globalThis.document = Object.assign(new EventTarget(), { querySelector:()=>null, hidden:false });
 globalThis.HTMLElement = class {};
@@ -82,3 +83,82 @@ assert.equal(buttons.get(Button.A),1,'label mode maps the bottom button to A');
 pads=[]; frame();
 assert.equal(buttons.get(Button.A),0);
 console.log('NX-Web input: all 25 defaults, remapping, diagonals, modal guards and gamepad connect/disconnect OK');
+
+const rect = { left:100, top:50, width:800, height:600 };
+assert.deepEqual(touchscreenPosition(rect, 500, 350), [640, 360]);
+assert.deepEqual(touchscreenPosition(rect, 100, 125), [0, 0]);
+assert.equal(touchscreenPosition(rect, 500, 124), null, 'top letterbox ignored');
+assert.equal(touchscreenPosition(rect, 500, 575), null, 'bottom edge excluded');
+assert.equal(touchscreenPosition(rect, 900, 350), null, 'right edge excluded');
+assert.deepEqual(touchscreenPosition(rect, 899.9, 574.9), [1279, 719]);
+assert.deepEqual(touchscreenPosition(rect, 100, 50, 16 / 9, true), [0, 0], 'stretched canvas');
+assert.equal(touchscreenPosition({ left:0, top:0, width:1600, height:450 }, 100, 225), null,
+  'pillarbox ignored');
+assert.deepEqual(touchscreenPosition({ left:0, top:0, width:1600, height:900 }, 800, 450), [640, 360],
+  'CSS coordinates do not depend on device pixel ratio');
+for (const invalid of [{ ...rect, width:0 }, { ...rect, height:-1 }, { ...rect, left:NaN }]) {
+  assert.equal(touchscreenPosition(invalid, 500, 350), null);
+}
+assert.equal(touchscreenPosition(rect, NaN, 0), null);
+const canvas = Object.assign(new EventTarget(), {
+  style:{}, width:1280, height:720, getBoundingClientRect:()=>rect,
+  setPointerCapture:()=>{}, hasPointerCapture:()=>false,
+});
+globalThis.getComputedStyle = () => ({ objectFit:'contain' });
+const touches = [];
+let touchModule = { _eden_set_touch:(...args)=>touches.push(args) };
+setupTouchscreen(canvas, ()=>touchModule);
+const pointerEvent = (type, pointerId, clientX=500, clientY=350, button=0) => {
+  const event = new Event(type, { cancelable:true });
+  Object.assign(event, { pointerId, clientX, clientY, button });
+  canvas.dispatchEvent(event);
+  return event;
+};
+pointerEvent('pointerdown', 9, 500, 80);
+pointerEvent('pointerdown', 10, 500, 350, 2);
+pointerEvent('pointermove', 11);
+assert.equal(touches.length, 0, 'outside, secondary button and hover ignored');
+assert.equal(pointerEvent('pointerdown', 100).defaultPrevented, true);
+pointerEvent('pointerdown', 200, 300, 350);
+assert.deepEqual(touches.slice(-2), [[0,640,360,1], [1,320,360,1]], 'independent contacts');
+pointerEvent('pointermove', 100, 700, 350);
+assert.deepEqual(touches.at(-1), [0,960,360,1]);
+pointerEvent('pointerup', 200);
+assert.deepEqual(touches.at(-1), [1,0,0,0], 'release only that contact');
+pointerEvent('pointermove', 100, 500, 80);
+assert.deepEqual(touches.at(-1), [0,0,0,0], 'dragging into letterbox releases');
+for (const type of ['pointercancel', 'pointerleave', 'lostpointercapture']) {
+  pointerEvent('pointerdown', 1);
+  pointerEvent(type, 1);
+  assert.deepEqual(touches.at(-1), [0,0,0,0], type);
+}
+for (const type of ['blur', 'nx-release-input']) {
+  pointerEvent('pointerdown', 1);
+  window.dispatchEvent(new Event(type));
+  assert.deepEqual(touches.at(-1), [0,0,0,0], type);
+}
+pointerEvent('pointerdown', 1);
+document.hidden = true;
+document.dispatchEvent(new Event('visibilitychange'));
+assert.deepEqual(touches.at(-1), [0,0,0,0], 'hidden document releases');
+document.hidden = false;
+document.querySelector = selector=>selector==='dialog[open]'?{}:null;
+const beforeDialog = touches.length;
+pointerEvent('pointerdown', 1);
+assert.equal(touches.length, beforeDialog, 'dialogs suppress touches');
+document.querySelector = ()=>null;
+for (let i=0; i<17; i++) pointerEvent('pointerdown', i);
+assert.equal(touches.length - beforeDialog, 16, 'at most sixteen active contacts');
+assert.equal(touches.filter(t=>t[3]===1).slice(-16).length, 16);
+const count = touches.length;
+pointerEvent('pointermove', 16);
+assert.equal(touches.length, count, 'seventeenth contact ignored');
+window.dispatchEvent(new Event('nx-release-input'));
+assert.equal(touches.slice(-16).every(t=>t[3]===0), true);
+pointerEvent('pointerdown', 1);
+touchModule = null;
+pointerEvent('pointermove', 1);
+assert.deepEqual(touches.at(-1), [0,0,0,0], 'release original module after shutdown');
+pointerEvent('pointerdown', 1);
+assert.deepEqual(touches.at(-1), [0,0,0,0], 'unavailable engine ignored');
+console.log('NX-Web touchscreen: letterbox/scale/stretch mapping, multitouch, capacity and release lifecycle OK');
