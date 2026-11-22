@@ -87,7 +87,7 @@ dialog::backdrop { background:#0009; backdrop-filter:blur(5px); }
 #settings-tabs,#settings-panels { scrollbar-width:thin; scrollbar-color:#414141 transparent; }
 #settings-panels .card { background:none; border:0; padding:26px 0; margin:0; box-shadow:none; border-radius:0; width:auto; min-width:0; }
 #settings-panels .card + .card { border-top:1px solid var(--line); }
-#settings-panels .card h2 { font-size:16px; font-weight:500; color:var(--text); margin:0 0 20px; letter-spacing:-.2px; }
+#settings-panels .card h2 { font-size:16px; font-weight:500; color:var(--text); margin:0 0 20px; letter-spacing:-.2px; border:0; padding:0; }
 #settings-panels .card h3 { font-size:11px; color:var(--muted); font-weight:500; margin:24px 0 14px; }
 .mode-help,.privacy-note { color:var(--muted); font-size:12px; line-height:1.8; }
 .privacy-note { padding:0; margin:0 0 26px; }
