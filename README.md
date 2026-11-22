@@ -148,6 +148,10 @@ This test boots through the normal file-input/ZIP flow in a fresh browser contex
 and measures completed SDL3 ScriptProcessor output buffers before browser volume
 and mute. It asserts callbacks and nonzero RMS, not physical speaker output.
 `AUDIO_SECONDS` controls the recording window (default 60, maximum 300).
+The probe reports first callback, first nonzero PCM, and first buffer with RMS at
+least 0.0001, in milliseconds from file selection (including ZIP/mount time).
+`AUDIO_REPORT=/path/report.json` saves PCM statistics, AudioContext state changes,
+and timestamped console logs; `AUDIO_SCREENSHOT=/path/title.png` saves the final frame.
 The probe presses A (keyboard `l`) after five seconds for interactive audio samples;
 set `AUDIO_KEY` to another key, or to an empty string to send no input.
 OpenTTD's bundled assets can take over 55 seconds to reach audible playback on software
@@ -157,6 +161,42 @@ opening demo: add `switch/nxquake/id1/autoexec.cfg` to the local bundle containi
 `volume 0.7`, `map start`, `wait`, and `play misc/menu1` on separate lines. This
 exercises the original NRO's mixer and SDL callback without rebuilding the guest.
 Keep the NROs, game assets, modified bundles and recordings outside the repository.
+
+### OpenTTD bundled graphics
+
+The OpenTTD ZIP is an external [Homebrew App Store package](https://switch.cdn.fortheusers.org/zips/OpenTTD.zip),
+not an asset checked into this repository. Its `info.json` identifies rsn8887's
+[Switch port v1.07](https://github.com/rsn8887/OpenTTD); `manifest.install` lists the
+flat `switch/openttd/` layout. NX-Web mounts those files on the emulated SD card.
+
+That package includes OpenGFX 0.5.2, whose extra-GRF GUI block supplies offsets
+0–174. The bundled OpenTTD build expects 179 GUI sprites: the missing four are
+`SPR_GROUP_LIVERY_TRAIN`, `SPR_GROUP_LIVERY_ROADVEH`, `SPR_GROUP_LIVERY_SHIP`, and
+`SPR_GROUP_LIVERY_AIRCRAFT` (offsets 175–178 from `SPR_OPENTTD_BASE=4896`, IDs
+5071–5074). OpenTTD supplies fallback graphics but warns about the outdated set.
+Official OpenGFX 7.1 supplies these four in Action 5 type 0x15, offset 175, count 4.
+
+Build an updated ZIP without changing the guest executable or importing separate
+SD data (Python 3.9+, standard library only):
+
+```sh
+python3 scripts/bundle-openttd.py ~/Downloads/OpenTTD-opengfx-7.1.zip
+# Or reuse the original downloads instead of downloading them again:
+python3 scripts/bundle-openttd.py ~/Downloads/OpenTTD-updated.zip \
+  --bundle ~/Downloads/OpenTTD.zip --opengfx ~/Downloads/opengfx-7.1-all.zip
+python3 tests/bundle_openttd.py
+```
+
+Load the generated ZIP through the normal file picker. The script verifies pinned
+SHA-256 digests, replaces all six OpenGFX GRFs plus their descriptor/readme/changelog/license,
+and preserves the original NRO, music, sound, package manifest, and paths. The data
+comes from the [official 7.1 release](https://cdn.openttd.org/opengfx-releases/7.1/),
+including its GPL-2.0 license and source-download instructions; corresponding source
+is [available here](https://cdn.openttd.org/opengfx-releases/7.1/opengfx-7.1-source.tar.xz).
+No original Transport Tycoon commercial assets are downloaded or needed. This does
+not modify the upstream App Store ZIP; an unchanged old ZIP still has the warning.
+Use a fresh browser profile when comparing bundles, since previously imported SD
+files intentionally take precedence over bundled assets.
 
 For CPU-only Linux VM testing, a locally validated headed Chrome configuration is:
 
