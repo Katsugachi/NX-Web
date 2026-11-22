@@ -7,7 +7,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { readZipEntries, writeZip } from '../web/system-files.js';
-import { savePathFor, restoreSaves, watchSaves, savePointInfo, exportSaves, importSaves } from '../web/recovery.js';
+import { savePathFor, restoreSaves, watchSaves, savePointInfo, exportSaves, importSaves, loadSlot } from '../web/recovery.js';
 import { EDEN_DATA_ROOT } from '../web/system-files.js';
 
 const files = [
@@ -55,6 +55,7 @@ assert.throws(() => savePathFor('0100F2C0115B6000/0.sav', undefined), /No user p
 console.log('save archives OK');
 
 let snapshot = new Map();
+const slots = new Map();
 let aborts = 0;
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const originalIndexedDB = globalThis.indexedDB;
@@ -69,8 +70,9 @@ globalThis.indexedDB = {
     queueMicrotask(() => {
       request.result = {
         close() {},
-        transaction() {
-          const pending = new Map(snapshot);
+        transaction(name) {
+          const source = name === 'slots' ? slots : snapshot;
+          const pending = new Map(source);
           let aborted = false;
           const read = result => {
             const request = {};
@@ -89,7 +91,7 @@ globalThis.indexedDB = {
           };
           setImmediate(() => {
             if (aborted) tx.onabort?.();
-            else { snapshot = pending; tx.oncomplete?.(); }
+            else { if (name !== 'slots') snapshot = pending; tx.oncomplete?.(); }
           });
           return tx;
         },
@@ -104,6 +106,18 @@ globalThis.clearInterval = () => {};
 console.warn = (...args) => warnings.push(args);
 
 try {
+  const titleId = '0100F2C0115B6000';
+  slots.set(1, { titleId, name: 'Test game', files: [[`nand/user/save/0000000000000000/${profile}/${titleId}/test.sav`, new Blob([new Uint8Array([7])])]] });
+  await assert.rejects(loadSlot(2, titleId), /empty/);
+  await assert.rejects(loadSlot(1, '0100000000000001'), /belongs to Test game/);
+  await assert.rejects(loadSlot(1, null), /belongs to Test game/);
+  assert.equal(snapshot.size, 0);
+  await loadSlot(1, titleId.toLowerCase());
+  assert.equal(snapshot.size, 2);
+  snapshot.clear();
+  await loadSlot(1);
+  assert.equal(snapshot.size, 2);
+  snapshot.clear();
   let saved;
   const contents = new Map();
   const sdContents = new Map();

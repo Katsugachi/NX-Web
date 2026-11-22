@@ -235,9 +235,12 @@ export async function listSlots() {
 
 /// Replaces the game's saves in the stored save point with `slot`. Returns the slot record and
 /// the new save point metadata.
-export async function loadSlot(slot) {
+export async function loadSlot(slot, runningTitleId) {
   const record = await withStore(SLOTS, 'readonly', store => requestResult(store.get(slot)));
   if (!record) throw new Error(`Slot ${slot} is empty`);
+  if (runningTitleId !== undefined && record.titleId !== runningTitleId?.toUpperCase()) {
+    throw new Error(`Slot ${slot} belongs to ${record.name}. Stop the current game before loading another game's slot.`);
+  }
   const kept = (await storedSaves()).filter(([path]) => !inTitleSave(path, record.titleId));
   // A profile created after the slot was saved has a new id; file the slot under it.
   const profile = kept.map(([key]) => PROFILE_SAVE.exec(key)?.[1]).find(Boolean);

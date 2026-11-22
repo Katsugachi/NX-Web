@@ -1377,10 +1377,11 @@ btnLoadSlot.addEventListener('click', async () => {
   await stopSaveWatch?.();
   stopSaveWatch = null;
   try {
-    const { meta } = await loadSlot(slot);
+    const { meta } = await loadSlot(slot, isRomLoaded ? runningGame?.titleId ?? null : undefined);
     showSavePoint(meta);
   } catch (err) {
     savesStatus.textContent = `Could not load slot ${slot}: ${err.message}`;
+    log(savesStatus.textContent, 'err');
     if (isRomLoaded) stopSaveWatch = watchSaves(() => edenModule?.FS, () => isRunning && !crashed, showSavePoint);
     return;
   }
