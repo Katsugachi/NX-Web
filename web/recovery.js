@@ -36,8 +36,9 @@ function openDb() {
 
 async function withStore(name, mode, fn) {
   const db = await openDb();
+  let tx;
   try {
-    const tx = db.transaction(name, mode);
+    tx = db.transaction(name, mode);
     const result = await fn(tx.objectStore(name));
     await new Promise((resolve, reject) => {
       tx.oncomplete = resolve;
@@ -45,6 +46,9 @@ async function withStore(name, mode, fn) {
       tx.onabort = () => reject(tx.error);
     });
     return result;
+  } catch (err) {
+    try { tx?.abort(); } catch {}
+    throw err;
   } finally {
     db.close();
   }

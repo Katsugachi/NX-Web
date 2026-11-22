@@ -7,7 +7,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { readZipEntries, writeZip } from '../web/system-files.js';
-import { savePathFor } from '../web/recovery.js';
+import { savePathFor, restoreSaves, watchSaves, savePointInfo } from '../web/recovery.js';
+import { EDEN_DATA_ROOT } from '../web/system-files.js';
 
 const files = [
   { name: 'nand/user/save/0000000000000000/0123456789ABCDEF0123456789ABCDEF/010013C00E930000/user1.dat', data: new Uint8Array([1, 2, 3]) },
@@ -48,3 +49,113 @@ assert.throws(() => savePathFor('0100F2C0115B6000/../../keys/prod.keys', profile
 assert.throws(() => savePathFor('0100F2C0115B6000/0.sav', undefined), /No user profile/);
 
 console.log('save archives OK');
+
+let snapshot = new Map();
+let aborts = 0;
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const originalIndexedDB = globalThis.indexedDB;
+const originalSetInterval = globalThis.setInterval;
+const originalClearInterval = globalThis.clearInterval;
+const originalWarn = console.warn;
+let poll;
+const warnings = [];
+globalThis.indexedDB = {
+  open() {
+    const request = {};
+    queueMicrotask(() => {
+      request.result = {
+        close() {},
+        transaction() {
+          const pending = new Map(snapshot);
+          let aborted = false;
+          const read = result => {
+            const request = {};
+            queueMicrotask(() => { request.result = result; request.onsuccess?.(); });
+            return request;
+          };
+          const tx = {
+            abort() { aborted = true; aborts++; },
+            objectStore: () => ({
+              clear: () => pending.clear(),
+              put: (value, key) => pending.set(key, value),
+              get: key => read(pending.get(key)),
+              getAllKeys: () => read([...pending.keys()]),
+              getAll: () => read([...pending.values()]),
+            }),
+          };
+          setImmediate(() => {
+            if (aborted) tx.onabort?.();
+            else { snapshot = pending; tx.oncomplete?.(); }
+          });
+          return tx;
+        },
+      };
+      request.onsuccess();
+    });
+    return request;
+  },
+};
+globalThis.setInterval = fn => { poll = fn; return 1; };
+globalThis.clearInterval = () => {};
+console.warn = (...args) => warnings.push(args);
+
+try {
+  let saved;
+  const contents = new Map();
+  let unreadable = null;
+  const FS = {
+    readdir(dir) {
+      if (dir === `${EDEN_DATA_ROOT}/nand/user/save`) return [...contents.keys()];
+      throw new Error('No directory');
+    },
+    stat(path) { return { size: contents.get(path.split('/').at(-1)).length, mtime: 1, mode: 0 }; },
+    isDir: () => false,
+    readFile(path) {
+      const name = path.split('/').at(-1);
+      if (name === unreadable) throw new Error('Save read failed');
+      return contents.get(name);
+    },
+  };
+  const stop = watchSaves(() => FS, () => true, meta => { saved = meta; });
+  assert.equal(await savePointInfo(), undefined);
+  assert.equal(await restoreSaves({}), 0);
+  contents.set('previous.sav', new Uint8Array([1, 2]));
+  await poll();
+  await poll();
+  assert.equal(saved.files, 1);
+  assert.equal(saved.bytes, 2);
+  const previous = new Map(snapshot);
+
+  contents.set('previous.sav', new Uint8Array([3, 4, 5]));
+  contents.set('broken.sav', new Uint8Array([6]));
+  unreadable = 'broken.sav';
+  await poll();
+  await poll();
+  await tick();
+  assert.equal(aborts, 1);
+  assert.match(warnings[0][1].message, /Save read failed/);
+  assert.deepEqual(snapshot, previous);
+  const restored = new Map();
+  assert.equal(await restoreSaves({
+    mkdirTree() {},
+    writeFile: (path, bytes) => restored.set(path, bytes),
+  }), 1);
+  assert.deepEqual(restored.get(`${EDEN_DATA_ROOT}/nand/user/save/previous.sav`), new Uint8Array([1, 2]));
+
+  unreadable = null;
+  await poll();
+  assert.equal(saved.files, 2);
+  assert.equal(saved.bytes, 4);
+  contents.clear();
+  await poll();
+  await poll();
+  assert.equal(saved.files, 0);
+  assert.equal(await restoreSaves({}), 0);
+  stop();
+} finally {
+  globalThis.indexedDB = originalIndexedDB;
+  globalThis.setInterval = originalSetInterval;
+  globalThis.clearInterval = originalClearInterval;
+  console.warn = originalWarn;
+}
+console.log('save snapshots: empty, replace, partial-read rollback, restore and retry OK');
