@@ -1373,6 +1373,11 @@ btnLoadSlot.addEventListener('click', async () => {
   const slot = Number(slotSelect.value);
   const record = slots[slot - 1];
   if (!record) return;
+  if (isRomLoaded && record.titleId !== runningGame?.titleId) {
+    savesStatus.textContent = `Slot ${slot} belongs to ${record.name}. Stop the current game before loading another game's slot.`;
+    log(savesStatus.textContent, 'err');
+    return;
+  }
   const restart = isRomLoaded && lastGameFile;
   if (isRomLoaded && !confirm(`Restart the game from slot ${slot} (${record.name})? Progress since it was saved is lost.`)) return;
   // A running game would overwrite the loaded slot with its own saves at the next save point.
