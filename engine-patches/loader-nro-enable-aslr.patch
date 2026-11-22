@@ -1,0 +1,49 @@
+diff --git a/src/core/hle/kernel/k_process.cpp b/src/core/hle/kernel/k_process.cpp
+index 27d1b1bfc4..a27e80c242 100644
+--- a/src/core/hle/kernel/k_process.cpp
++++ b/src/core/hle/kernel/k_process.cpp
+@@ -1188,7 +1188,7 @@ KProcess::KProcess(KernelCore& kernel)
+ 
+ KProcess::~KProcess() = default;
+ 
+-Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMetadata& metadata, std::size_t code_size, KProcessAddress aslr_space_start, size_t aslr_space_offset) {
++Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMetadata& metadata, std::size_t code_size, KProcessAddress aslr_space_start, size_t aslr_space_offset, bool enable_aslr) {
+     // Create a resource limit for the process.
+     const auto pool = static_cast<KMemoryManager::Pool>(metadata.GetPoolPartition());
+     const auto physical_memory_size = kernel.MemoryManager().GetSize(pool);
+@@ -1202,6 +1202,9 @@ Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMeta
+ 
+     // Declare flags and code address.
+     Svc::CreateProcessFlag flag{};
++    if (enable_aslr) {
++        flag |= Svc::CreateProcessFlag::EnableAslr;
++    }
+     u64 code_address{};
+ 
+     // Determine if we are an application.
+diff --git a/src/core/hle/kernel/k_process.h b/src/core/hle/kernel/k_process.h
+index b5693751c3..05c4596489 100644
+--- a/src/core/hle/kernel/k_process.h
++++ b/src/core/hle/kernel/k_process.h
+@@ -515,7 +515,7 @@ public:
+     }
+ 
+ public:
+-    Result LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMetadata& metadata, std::size_t code_size, KProcessAddress aslr_space_start, size_t aslr_space_offset);
++    Result LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMetadata& metadata, std::size_t code_size, KProcessAddress aslr_space_start, size_t aslr_space_offset, bool enable_aslr = false);
+ 
+     void LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress base_addr);
+ 
+diff --git a/src/core/loader/nro.cpp b/src/core/loader/nro.cpp
+index 4ba4bde0bb..67836511db 100644
+--- a/src/core/loader/nro.cpp
++++ b/src/core/loader/nro.cpp
+@@ -280,7 +280,7 @@ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
+ 
+     // Setup the process code layout
+     if (process
+-            .LoadFromMetadata(system.Kernel(), FileSys::ProgramMetadata::GetDefault(), image_size, fastmem_base, aslr_offset)
++            .LoadFromMetadata(system.Kernel(), FileSys::ProgramMetadata::GetDefault(), image_size, fastmem_base, aslr_offset, true)
+             .IsError()) {
+         return false;
+     }

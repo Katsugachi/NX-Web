@@ -129,6 +129,35 @@ Build libnx examples using [devkitPro](https://devkitpro.org/), for example the
 4. Check the FPS in the bar and logs under Diagnostics; capture screenshots and
    check for page exceptions, device loss and crashes, not just a “Running” label.
 
+Top-level homebrew NRO loads enable process ASLR, as an hbloader application
+process does on hardware. Other loaders retain their existing policy; the kernel
+metadata-loading API still permits ASLR to be disabled. Old libnx releases (including
+NXQuake v0.1.1's allocator) can otherwise select a thread-stack mapping that overlaps
+the main stack: their free-space check compares against an entire `QueryMemory`
+block's size rather than the space remaining after the queried address. The libnx
+bounds check was fixed in [145ad1ba](https://github.com/switchbrew/libnx/commit/145ad1ba8740d9ba3d132d52229abb01b876276d).
+
+To measure nonzero browser PCM, run the opt-in audio test against a running Chrome
+with CDP enabled, using a legally obtained audio-producing homebrew NRO or ZIP:
+
+```sh
+ROM_PATH=/path/to/playtone.nro CDP_URL=http://127.0.0.1:9227 node tests/audio_browser.mjs
+```
+
+This test boots through the normal file-input/ZIP flow in a fresh browser context
+and measures completed SDL3 ScriptProcessor output buffers before browser volume
+and mute. It asserts callbacks and nonzero RMS, not physical speaker output.
+`AUDIO_SECONDS` controls the recording window (default 60, maximum 300).
+The probe presses A (keyboard `l`) after five seconds for interactive audio samples;
+set `AUDIO_KEY` to another key, or to an empty string to send no input.
+OpenTTD's bundled assets can take over 55 seconds to reach audible playback on software
+rendering; allow 95 seconds rather than treating an earlier zero as an audio error.
+For NXQuake with LibreQuake, use a known sound stimulus rather than relying on the
+opening demo: add `switch/nxquake/id1/autoexec.cfg` to the local bundle containing
+`volume 0.7`, `map start`, `wait`, and `play misc/menu1` on separate lines. This
+exercises the original NRO's mixer and SDL callback without rebuilding the guest.
+Keep the NROs, game assets, modified bundles and recordings outside the repository.
+
 For CPU-only Linux VM testing, a locally validated headed Chrome configuration is:
 
 ```sh
