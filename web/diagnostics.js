@@ -278,7 +278,7 @@ export function errorOrigin(error, category) {
 
 const FIXES = {
   environment: 'This browser or device is missing something the engine needs; see the browser check above.',
-  artifact: 'The runtime files are missing or did not download completely. Locally, build the engine and run `npm run sync`; online, do a hard reload (Ctrl+Shift+R).',
+  artifact: 'The runtime files are missing or did not download completely. Locally, run `npm run build:engine`; online, do a hard reload (Ctrl+Shift+R).',
   init: 'The runtime failed to start. Close other heavy tabs and reload; if it keeps failing, download the diagnostic bundle and report it.',
   'system-files': 'Keys or firmware are missing or do not match the game: add prod.keys (and title.keys) and firmware in the System Files widget, then reload.',
   boot: 'The game failed to load. Check that the dump is complete and is an .nsp, .xci or .nro the keys can decrypt.',

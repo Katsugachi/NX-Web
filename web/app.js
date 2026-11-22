@@ -1308,6 +1308,7 @@ async function resumeAfterCrash() {
 
 function showSavePoint(meta) {
   document.getElementById('btn-saves-export').disabled = !meta?.files;
+  document.getElementById('btn-saves-clear').disabled = !meta?.files;
   if (!meta) return;
   const kb = (meta.bytes / 1024).toFixed(0);
   document.getElementById('save-point').textContent =

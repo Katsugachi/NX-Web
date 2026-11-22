@@ -57,4 +57,14 @@ const allowed = Object.assign(new Event('keydown', { cancelable:true }), { altKe
 window.dispatchEvent(allowed);
 assert.equal(allowed.defaultPrevented, false);
 assert.equal(rebindingRead, true);
+const appSource = await readFile(new URL('../web/app.js', import.meta.url), 'utf8');
+const savePointSource = appSource.slice(appSource.indexOf('function showSavePoint(meta) {'), appSource.indexOf('async function refreshCrashReports()'));
+const saveElements = new Map(['btn-saves-export', 'btn-saves-clear', 'save-point'].map(id => [id, {}]));
+const saveScope = { document:{ getElementById:id=>saveElements.get(id) } };
+runInNewContext(savePointSource, saveScope);
+for (const [meta, disabled] of [[undefined, true], [{files:0, bytes:0, time:0}, true], [{files:1, bytes:1, time:1}, false], [null, true]]) {
+  saveScope.showSavePoint(meta);
+  assert.equal(saveElements.get('btn-saves-clear').disabled, disabled, 'Delete all follows the save point');
+  assert.equal(saveElements.get('btn-saves-export').disabled, disabled);
+}
 console.log('NX-Web shell: recents, compatibility failures, remapping, conflicts and blocked storage OK');

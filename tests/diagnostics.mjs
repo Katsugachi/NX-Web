@@ -70,6 +70,9 @@ assert.equal(classifyFailure({ stage: 'running', detail: 'no frames for 46 s' })
 assert.equal(classifyFailure({ stage: 'init', detail: new TypeError('x is not a function') }).category, 'init');
 assert.equal(classifyFailure({ stage: 'init', detail: new TypeError('x is not a function') }).origin, 'frontend');
 assert.equal(classifyFailure({ stage: 'init', detail: 'failed to load runtime/eden.wasm: 404' }).category, 'artifact');
+const artifactFix = classifyFailure({ stage:'init', detail:'runtime/eden.js not found' }).fix;
+assert.match(artifactFix, /npm run build:engine/);
+assert.doesNotMatch(artifactFix, /npm run sync/);
 const gpu = classifyFailure({ stage: 'boot', detail: 'WebGPU is unavailable' });
 assert.equal(gpu.category, 'environment');
 assert.equal(gpu.origin, 'environment');
