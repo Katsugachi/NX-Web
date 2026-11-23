@@ -245,7 +245,7 @@ function updateState() {
   const problem = runtimeProblem(state);
   $('runtime-problem').hidden = !problem;
   $('runtime-problem').textContent = problem;
-  if (['Booting','Running','Paused','Failed','Crashed','Stopped'].includes(state)) {
+  if (['Booting','Running','Paused','Failed','Crashed','Stopped','Exited'].includes(state)) {
     $('library').hidden = true; $('player').hidden = false; document.body.classList.add('playing');
   }
   const paused = state === 'Paused';
@@ -255,7 +255,7 @@ function updateState() {
   }
   $('toggle-pause').disabled = !['Running','Paused'].includes(state);
   $('player-message').hidden = ['Running','Paused'].includes(state);
-  $('player-message').textContent = ['Failed','Crashed'].includes(state) ? $('rom-status').textContent : `${state}…`;
+  $('player-message').textContent = ['Failed','Crashed','Exited'].includes(state) ? $('rom-status').textContent : `${state}…`;
   if (state !== previousState) { previousState = state; showBar(); }
 }
 let previousState;

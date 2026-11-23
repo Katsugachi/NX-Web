@@ -541,7 +541,7 @@ function reloadForMemory() {
   return true;
 }
 
-const EmuState = ['Idle', 'Booting', 'Running', 'Paused', 'Failed', 'Stopped'];
+const EmuState = ['Idle', 'Booting', 'Running', 'Paused', 'Failed', 'Stopped', 'Exited'];
 let statusTimer = null;
 let lastState = -1;
 
@@ -615,6 +615,9 @@ function pollStatus() {
     lastState = state;
     if (state === 1) peakFps = 0;
     log(`Emulation state: ${name}`, state === 4 ? 'err' : 'ui');
+    if (state === 6) {
+      void onGuestExit();
+    }
     if ((state === 2 || state === 4) && edenModule._eden_is_switch2_title?.() === 1) {
       log('This is a Nintendo Switch 2 game. Switch 2 games are not supported yet, so it may not boot or run correctly.', 'err');
     }
@@ -625,6 +628,8 @@ function pollStatus() {
       ? 'Boot failed: Nintendo Switch 2 games are not supported yet'
       : `Boot failed (load result ${edenModule._eden_get_load_result()})`;
     romStatus.textContent = gpuFailure ? `GPU initialization failed: ${gpuFailure}. This runtime has no WebGL fallback; see the engine log for adapter/device errors.` : wasmStatusText.textContent;
+  } else if (state === 6) {
+    wasmStatusText.textContent = `Exited: ${currentRomName}`;
   } else if (state >= 1 && state <= 3) {
     wasmStatusText.textContent = `${name}: ${currentRomName}`;
   }
@@ -645,6 +650,18 @@ function pollStatus() {
   if (isRunning) peakFps = Math.max(peakFps, gameFps);
   speedFps.textContent = isRunning ? `${gameFps.toFixed(1)} FPS` : '--';
   speedPeak.textContent = peakFps > 0 ? `${peakFps.toFixed(1)} FPS` : '--';
+}
+
+async function onGuestExit() {
+  loader.finish();
+  setRomStatus('Game exited normally. Use Back to library to choose another title.');
+  const stop = stopSaveWatch;
+  stopSaveWatch = null;
+  try {
+    await stop?.();
+  } catch (err) {
+    log(`Could not preserve saves after exit: ${err.message}`, 'err');
+  }
 }
 
 function startLoop() {

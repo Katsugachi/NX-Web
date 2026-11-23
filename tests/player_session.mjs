@@ -30,6 +30,34 @@ await assert.rejects(rebootGame(file, { ...actions, stash: async () => { throw n
 assert.deepEqual(calls, []);
 
 const appSource = await readFile(new URL('../web/app.js', import.meta.url), 'utf8');
+const exitSource = appSource.slice(appSource.indexOf('async function onGuestExit('), appSource.indexOf('\nfunction startLoop('));
+for (const mode of ['saved', 'empty', 'error']) {
+  const exitCalls = [];
+  const scope = {
+    stopSaveWatch: mode === 'empty' ? null : async () => {
+      exitCalls.push('save');
+      if (mode === 'error') throw new Error('storage blocked');
+    },
+    loader: { finish: () => exitCalls.push('finish') },
+    setRomStatus: text => { assert.match(text, /exited normally.*Back to library/); exitCalls.push('exited'); },
+    log: text => { assert.match(text, /storage blocked/); exitCalls.push('error'); },
+  };
+  await runInNewContext(`${exitSource}; onGuestExit();`, scope);
+  assert.equal(scope.stopSaveWatch, null);
+  assert.deepEqual(exitCalls, mode === 'empty' ? ['finish', 'exited']
+    : mode === 'error' ? ['finish', 'exited', 'save', 'error'] : ['finish', 'exited', 'save']);
+}
+const crashSource = appSource.slice(appSource.indexOf('const CRASH_OUTPUT ='), appSource.indexOf('// Frame counters'));
+const crashCalls = [];
+const checkCrash = runInNewContext(`${crashSource}; checkCrashOutput;`, {
+  isRomLoaded: true, crashed: false, ANSI_ESCAPE: /\x1b\[[0-9;]*m/g,
+  onCrash: reason => crashCalls.push(reason),
+});
+checkCrash('Kernel.SVC <Info> ExitProcess: Process 81 exiting');
+assert.equal(crashCalls.length, 0);
+checkCrash('Core.ARM <Critical> ExceptionRaised(exception = 0)');
+checkCrash('RuntimeError: unreachable');
+assert.equal(crashCalls.length, 2, 'genuine CPU faults and Wasm traps still invoke onCrash');
 const stashSource = appSource.slice(appSource.indexOf('async function stashGameFile('), appSource.indexOf('\nfunction showSavePoint('));
 let generation = 0;
 let writes = 0;
