@@ -358,7 +358,7 @@ export async function clearSlot(slot) {
 }
 
 /// Polls the save folders while `healthy()` holds and stores changes immediately.
-/// Returns a function that stops watching.
+/// Returns a function that stops watching, optionally flushing after a normal guest exit.
 export function watchSaves(getFS, healthy, onSaved, intervalMs = 2_000, lifecycle = globalThis) {
   let connection;
   const ready = openDb().then(db => { connection = db; }).catch(err => {
@@ -370,11 +370,11 @@ export function watchSaves(getFS, healthy, onSaved, intervalMs = 2_000, lifecycl
   let busy = null;
   let inFlightFiles = null;
   let active = true;
-  const flush = (immediate = false) => {
+  const flush = (immediate = false, final = false) => {
     if (!active) return Promise.resolve();
-    if (busy) return immediate ? busy.then(() => flush(true)) : busy;
+    if (busy) return immediate ? busy.then(() => flush(true, final)) : busy;
     const FS = getFS();
-    if (!FS || !healthy()) return Promise.resolve();
+    if (!FS || (!final && !healthy())) return Promise.resolve();
     busy = (async () => {
       try {
         const files = listSaveFiles(FS);
@@ -405,11 +405,15 @@ export function watchSaves(getFS, healthy, onSaved, intervalMs = 2_000, lifecycl
   lifecycle.document?.addEventListener('visibilitychange', onHidden);
   lifecycle.addEventListener?.('pagehide', onPageHide);
   const timer = setInterval(() => flush(), intervalMs);
-  return async () => {
-    active = false;
+  return async ({ flush: final = false } = {}) => {
     clearInterval(timer);
     lifecycle.document?.removeEventListener('visibilitychange', onHidden);
     lifecycle.removeEventListener?.('pagehide', onPageHide);
+    if (final) {
+      await ready;
+      await flush(true, true);
+    }
+    active = false;
     await busy;
     await ready;
     connection?.close();

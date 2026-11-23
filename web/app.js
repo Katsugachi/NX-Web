@@ -689,7 +689,7 @@ async function onGuestExit() {
   const stop = stopSaveWatch;
   stopSaveWatch = null;
   try {
-    await stop?.();
+    await stop?.({ flush: true });
   } catch (err) {
     log(`Could not preserve saves after exit: ${err.message}`, 'err');
   }

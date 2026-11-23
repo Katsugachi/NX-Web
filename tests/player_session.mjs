@@ -35,7 +35,8 @@ for (const mode of ['saved', 'empty', 'error']) {
   const exitCalls = [];
   const scope = {
     bootWatchdog: { stop() {} },
-    stopSaveWatch: mode === 'empty' ? null : async () => {
+    stopSaveWatch: mode === 'empty' ? null : async options => {
+      assert.equal(options.flush, true);
       exitCalls.push('save');
       if (mode === 'error') throw new Error('storage blocked');
     },
