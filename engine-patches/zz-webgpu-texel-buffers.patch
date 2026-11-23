@@ -235,7 +235,7 @@
          for (const auto& desc : info.texture_descriptors) {
              for (u32 index = 0; index < desc.count; ++index) {
                  const u32 index_offset{index << desc.size_shift};
-@@ -1304,6 +1346,23 @@
+@@ -1304,6 +1346,18 @@
          }
      }
      texture_cache.FillImageViews(std::span(views.data(), views.size()), false, false);
@@ -247,11 +247,6 @@
 +        const u32 count{Shader::NumDescriptors(stage_infos[stage].texture_buffer_descriptors)};
 +        for (u32 index = 0; index < count; ++index) {
 +            const ImageView& view{texture_cache.GetImageView(buffer_views[buffer_view_index++].id)};
-+            if (!GetTexelBufferFormat(view.format)) {
-+                LOG_ERROR(Render, "WebGPU pipeline {:016x}: unsupported texel buffer format {}",
-+                          key.Hash(), static_cast<u32>(view.format));
-+                return false;
-+            }
 +            buffer_cache.BindGraphicsTextureBuffer(stage, index, view.GpuAddr(), view.BufferSize(),
 +                                                   view.format, false, false);
 +        }
@@ -259,7 +254,7 @@
 
      buffer_cache.UpdateGraphicsBuffers(is_indexed);
      buffer_cache.BindHostGeometryBuffers(is_indexed);
-@@ -1475,6 +1534,23 @@
+@@ -1475,6 +1529,23 @@
                  }
                  (writable ? written_buffers : read_buffers).push_back(bound.buffer.Get());
              }
@@ -267,7 +262,7 @@
 +        for (u32 i = 0; i < Shader::NumDescriptors(info.texture_buffer_descriptors); ++i) {
 +            if (descriptor_index >= descriptors.size()) return false;
 +            const BufferDescriptor& bound = descriptors[descriptor_index++];
-+            if (bound.texel_info[2] == 0 || !bound.buffer) return false;
++            if (!bound.texel_info || !bound.buffer) return false;
 +            auto& buffer = entries.emplace_back();
 +            buffer.binding = binding_index++;
 +            buffer.buffer = bound.buffer;
@@ -278,8 +273,8 @@
 +            metadata.binding = binding_index++;
 +            metadata.buffer = cache.uniform_ring.Buffer();
 +            metadata.offset = cache.uniform_ring.Push(
-+                {reinterpret_cast<const u8*>(bound.texel_info.data()), sizeof(bound.texel_info)});
-+            metadata.size = sizeof(bound.texel_info);
++                {reinterpret_cast<const u8*>(bound.texel_info->data()), sizeof(*bound.texel_info)});
++            metadata.size = sizeof(*bound.texel_info);
          }
          u32 ordinal{};
          const u32 shared_first{Shader::Backend::WGSL::SharedSamplerFirst(
@@ -293,7 +288,7 @@
 
  namespace WebGPU {
 
-@@ -468,4 +469,18 @@
+@@ -468,4 +469,16 @@
      desc.size = Common::AlignUp(std::max<u64>(size, 4), 4);
  }
 
@@ -303,10 +298,8 @@
 +    desc.buffer = buffer.Handle();
 +    desc.offset = Common::AlignDown<u64>(offset, 256);
 +    desc.size = Common::AlignUp<u64>(std::max<u64>(size + offset - desc.offset, 4), 4);
-+    if (const auto layout = GetTexelBufferFormat(format)) {
-+        desc.texel_info = {static_cast<u32>(offset - desc.offset), size / layout->Bytes(),
-+                           layout->Packed(), 0};
-+    } else {
++    desc.texel_info = GetTexelBufferInfo(static_cast<u32>(offset - desc.offset), size, format);
++    if (!desc.texel_info) {
 +        LOG_ERROR(Render, "Unsupported WebGPU texel buffer format {}", static_cast<u32>(format));
 +    }
 +}
@@ -314,15 +307,23 @@
  } // namespace WebGPU
 --- a/src/video_core/renderer_webgpu/wgpu_buffer_cache.h
 +++ b/src/video_core/renderer_webgpu/wgpu_buffer_cache.h
-@@ -58,6 +58,7 @@
+@@ -4,6 +4,7 @@
+ #pragma once
+
+ #include <array>
++#include <optional>
+ #include <span>
+ #include <vector>
+
+@@ -58,6 +59,7 @@
      u64 offset{};
      u64 size{};
      std::vector<u8> data;  ///< Uniform contents, copied into the uniform ring per draw
-+    std::array<u32, 4> texel_info{};
++    std::optional<std::array<u32, 4>> texel_info;
  };
 
  /// Index data the next indexed draw uses, possibly converted to a format WebGPU supports.
-@@ -146,7 +147,8 @@
+@@ -146,7 +148,8 @@
 
      void BindUniformBuffer(const Buffer& buffer, u32 offset, u32 size);
      void BindStorageBuffer(const Buffer& buffer, u32 offset, u32 size, bool is_written);
@@ -334,11 +335,12 @@
      bool PrefersSparseSources() const noexcept {
 --- /dev/null
 +++ b/src/video_core/renderer_webgpu/wgpu_texel_buffer.h
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,130 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
 +#pragma once
 +
++#include <array>
 +#include <optional>
 +#include <span>
 +#include "common/common_types.h"
@@ -452,6 +454,17 @@
 +    }
 +}
 +
++inline std::optional<std::array<u32, 4>> GetTexelBufferInfo(
++    u32 offset, u32 size, VideoCore::Surface::PixelFormat format) {
++    if (size == 0) {
++        return std::array<u32, 4>{};
++    }
++    if (const auto layout = GetTexelBufferFormat(format)) {
++        return std::array<u32, 4>{offset, size / layout->Bytes(), layout->Packed(), 0};
++    }
++    return std::nullopt;
++}
++
 +} // namespace WebGPU
 --- a/src/tests/CMakeLists.txt
 +++ b/src/tests/CMakeLists.txt
@@ -465,7 +478,7 @@
 
 --- /dev/null
 +++ b/src/tests/video_core/webgpu_texel_buffer.cpp
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,130 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
 +#include <algorithm>
@@ -554,6 +567,20 @@
 +    CHECK_FALSE(WebGPU::GetTexelBufferFormat(PixelFormat::BC1_RGBA_UNORM));
 +}
 +
++TEST_CASE("WebGPU null texel slots bind zero-count metadata", "[shader][texel-buffer]") {
++    using VideoCore::Surface::PixelFormat;
++    const auto empty = WebGPU::GetTexelBufferInfo(0, 0, PixelFormat::Invalid);
++    REQUIRE(empty);
++    CHECK(*empty == std::array<u32, 4>{});
++    const auto unsupported = WebGPU::GetTexelBufferInfo(0, 4, PixelFormat::A2R10G10B10_UNORM);
++    CHECK_FALSE(unsupported);
++    const auto supported = WebGPU::GetTexelBufferInfo(12, 32, PixelFormat::R32G32B32A32_FLOAT);
++    REQUIRE(supported);
++    CHECK((*supported)[0] == 12);
++    CHECK((*supported)[1] == 2);
++    CHECK((*supported)[2] == WebGPU::GetTexelBufferFormat(PixelFormat::R32G32B32A32_FLOAT)->Packed());
++}
++
 +TEST_CASE("WebGPU texel buffers have distinct storage and metadata bindings", "[shader][texel-buffer]") {
 +    using namespace Shader;
 +    IR::Program program;
@@ -569,7 +596,7 @@
 +    CHECK(ctx.header.find("tbo_fetch2") != std::string::npos);
 +    CHECK(ctx.header.find("if(index>=texel_info.y)") != std::string::npos);
 +    const auto begin = ctx.header.find("@group(0) @binding(0) var<storage, read> tbo0");
-+    const auto end = ctx.header.find("return result;}", begin);
++    const auto end = ctx.header.find("return result;}", ctx.header.find("fn tbo_fetch2", begin));
 +    REQUIRE(begin != std::string::npos);
 +    REQUIRE(end != std::string::npos);
 +    std::cout << "TBO_SHADER_BEGIN\n" << ctx.header.substr(begin, end + 15 - begin)

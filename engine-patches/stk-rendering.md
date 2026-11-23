@@ -32,8 +32,12 @@ Graphics texel buffers now go through the existing coherent buffer cache and are
 bound as read-only storage with per-draw byte offset, texel count and format
 metadata. WGSL decodes scalar/vector 8/16/32-bit float, integer and normalized
 formats, preserves integer bit patterns and missing-channel defaults, and bounds
-checks fetches. Unsupported packed/compressed formats fail the pipeline explicitly
-instead of silently returning zero. Read buffers participate in existing
+checks fetches. Unsupported nonempty packed/compressed formats skip that draw
+without invalidating the cached pipeline. Empty/unbound slots use the buffer
+cache's null buffer and zero-count metadata, so reads return zero without dropping
+draws that use other array slots. SNORM normalization is performed by WGSL, not
+repeated by the IR texture pass. Descriptor totals are checked against the fixed
+buffer-cache capacity before binding. Read buffers participate in existing
 read/write alias handling. Compute texel-buffer and image-buffer support is
 unchanged; these patches do not implement those stubs.
 
