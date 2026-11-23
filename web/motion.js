@@ -3,6 +3,7 @@ const G = 9.80665;
 const TAU = 2 * Math.PI;
 const ZERO = [0, 0, 0];
 const REST = [0, 0, -1];
+const TRACKING_GRAVITY = [0, -1, 0];
 const FRESH_MS = 250;
 
 const numeric = values => values.every(Number.isFinite) ? values : null;
@@ -44,10 +45,14 @@ function gamepadSample(gamepad) {
   const norm = quat ? Math.hypot(...quat) : 0;
   const pose = norm > 0 && Number.isFinite(norm) ? scaled(quat, 1 / norm) : null;
   if (!gyro && !linear && !pose) return null;
-  const local = vector => pose ? toLocal(vector, pose) : vector;
+  const local = vector => {
+    // WebVR tracking uses Y up and -Z forward; Eden's controller uses Z up and Y forward.
+    const [x, y, z] = pose ? toLocal(vector, pose) : vector;
+    return [x, -z, y];
+  };
   return {
     gyro: scaled(local(gyro ?? ZERO), 1 / TAU),
-    accel: local((linear ?? ZERO).map((value, axis) => REST[axis] - value / G)),
+    accel: local((linear ?? ZERO).map((value, axis) => TRACKING_GRAVITY[axis] - value / G)),
   };
 }
 
