@@ -635,6 +635,7 @@ export function setupCompatibility({ log = () => {} } = {}) {
       this.observing = true;
       this.crash = null;
       this.failed = false;
+      this.exited = false;
       this.timer = setInterval(() => this.poll(), POLL_MS);
       this.lastRaf = null;
       const tick = time => {
@@ -654,6 +655,7 @@ export function setupCompatibility({ log = () => {} } = {}) {
     }
 
     poll() {
+      if (!this.observing) return;
       const now = performance.now();
       let state;
       let fps;
@@ -661,6 +663,11 @@ export function setupCompatibility({ log = () => {} } = {}) {
         state = this.module._eden_get_state();
         fps = Number(this.module._eden_get_game_fps());
       } catch {
+        return;
+      }
+      if (state === 6) {
+        this.exited = true;
+        this.finish();
         return;
       }
       if (!Number.isFinite(fps)) fps = 0;
@@ -716,6 +723,7 @@ export function setupCompatibility({ log = () => {} } = {}) {
         scenario: { name: 'browser-session', seconds: Math.round((now - this.bootAt) / 1000), warm: false,
           settings: { playSeconds: PLAY_MS / 1000, bootLimitSeconds: BOOT_LIMIT_MS / 1000, minPlayableFps: MIN_PLAYABLE_FPS } },
         ...assessment,
+        notes: this.exited ? 'Guest exited normally.' : '',
         metrics: {
           coreReadyMs,
           timeToFirstFrameMs: this.firstFrameAt == null ? null : Math.round(this.firstFrameAt - this.bootAt),
@@ -743,7 +751,7 @@ export function setupCompatibility({ log = () => {} } = {}) {
       clearInterval(this.timer);
       removeEventListener('pagehide', this.onHide);
       const result = await this.record();
-      const verdict = result.outcome === 'pass' ? 'passed' : `failed (${result.failure.category}: ${result.failure.detail})`;
+      const verdict = this.exited ? 'exited normally' : result.outcome === 'pass' ? 'passed' : `failed (${result.failure.category}: ${result.failure.detail})`;
       const text = `Recorded ${gameLabel(this.game)} on ${coreName(this.core.id)}: ${verdict}.`;
       status.textContent = text;
       log(`Compatibility: ${text}`, 'ui');

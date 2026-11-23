@@ -2,6 +2,8 @@
 // Checks the pure logic of the Compatibility widget in web/compat.js.
 
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { runInNewContext } from 'node:vm';
 import { makeResult } from '../web/results.js';
 import {
   assessSession, findRegressions, gameIdentity, gameKey, groupByGame, parseFileName, parseImport, recommend,
@@ -114,5 +116,43 @@ assert.equal(assessSession({ ...base, crash: 'no frames for 46 s' }).failure.cat
 const samples = [0, 10, 20, 30, 40, 50].map((fps, i) => ({ t: i * 1000, fps }));
 assert.equal(sustainedFps(samples, 3000), 50);
 assert.equal(sustainedFps(samples, null), 0);
+
+const compatSource = await readFile(new URL('../web/compat.js', import.meta.url), 'utf8');
+const sessionSource = compatSource.slice(compatSource.indexOf('  class Session {'), compatSource.indexOf('\n  refresh();', compatSource.indexOf('  class Session {')));
+let now = 0;
+let state = 2;
+let cleared = 0;
+let removed = 0;
+const recorded = [];
+const messages = [];
+const Session = runInNewContext(`${sessionSource}; Session;`, {
+  makeResult, gameIdentity, sustainedFps, assessSession, performance: { now: () => now },
+  setInterval: () => 1, clearInterval: () => cleared++, requestAnimationFrame() {},
+  addEventListener() {}, removeEventListener: () => removed++, document: { hidden: false },
+  readGameInfo: () => null, readEngineFrameTimes: () => null, frameTimeStats: () => null,
+  coreField: core => core, environment: Promise.resolve({}), coreReadyMs: 0,
+  PLAY_MS: 45_000, BOOT_LIMIT_MS: 180_000, CHECKPOINT_MS: 15_000, POLL_MS: 500, MAX_FRAME_SAMPLES: 20_000, MIN_PLAYABLE_FPS: 10,
+  save: async results => recorded.push(...results), status: {},
+  gameLabel: game => game.name, coreName: id => id, log: text => messages.push(text),
+});
+const session = new Session({
+  module: { _eden_get_state: () => state, _eden_get_game_fps: () => state === 2 ? 60 : 0 },
+  rom: { name: 'hello.nro', size: 10 }, core: { id: 'jit' },
+});
+session.poll();
+now = 1000;
+state = 6;
+session.poll();
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(session.observing, false);
+assert.equal(cleared, 1, 'normal exit stops the compatibility hang timer');
+assert.equal(removed, 1, 'normal exit removes the pagehide observer');
+assert.equal(recorded[0].outcome, 'pass');
+assert.equal(recorded[0].notes, 'Guest exited normally.');
+now += 30_000;
+session.poll();
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(recorded.length, 1, 'an exited title cannot later be recorded as a hang');
+assert.match(messages[0], /exited normally/);
 
 console.log('compatibility logic OK');

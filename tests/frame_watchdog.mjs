@@ -74,4 +74,9 @@ legacy(2, 1);
 time += 11;
 legacy(2, 0);
 assert.equal(freezes.length, 2, 'legacy runtimes fall back to FPS');
+const exited = createFrameWatchdog({ timeoutMs: 10, now: () => time,
+  onFreeze: () => assert.fail('normal exit must not enter crash handling') });
+exited(2, 60, 1);
+time += 30_000;
+exited(6, 0, 1);
 console.log('Frame watchdog: stale FPS, long pause, first frame and legacy runtime OK');
