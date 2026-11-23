@@ -22,6 +22,11 @@ shader value. WebGPU preserves the latter in DrawInfo, and WGSL computes guest
 InstanceId as `instance_index - base_instance`, matching the SPIR-V backend.
 InstanceId-only shaders also require per-command base-instance copies for
 indirect and multidraw submissions; `ReadsDrawParameters` includes that input.
+For tessellation, DrawInfo's otherwise unused `padding` holds the native fetch
+base, including the raw instance cursor. Compute vertex fetches use that base;
+control and evaluation InstanceId values subtract the guest base, as the vertex
+stage does. Each single-instance dispatch therefore retains the correct fetch
+offset and logical ID without changing the shared uniform layout.
 Immediate array-instance commands likewise no longer leave a deferred batch
 behind. Native backend batching is unchanged. HLE macro draws that explicitly
 provide an instance count still use native instanced draws; raw/LLE instance

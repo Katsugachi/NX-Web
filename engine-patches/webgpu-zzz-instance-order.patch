@@ -80,6 +80,14 @@ diff --git a/src/video_core/renderer_webgpu/wgpu_rasterizer.cpp b/src/video_core
      if (emulated) {
          info.padding = first;
          if (indexed) {
+@@ -232,6 +234,7 @@
+     u32 tessellation_patch_count{};
+     bool tessellation_records_capped{};
+     if (tessellation) {
++        info.padding = draw_state.base_instance;
+         const u64 patches = static_cast<u64>(count / pipeline->PatchSize()) * instance_count;
+         if (patches == 0) {
+             return;
 diff --git a/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp b/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
 --- a/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
 +++ b/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
@@ -108,3 +116,34 @@ diff --git a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp b/src/video_
 +               info.loads[Shader::IR::Attribute::InstanceId];
      });
  }
+
+diff --git a/src/shader_recompiler/backend/wgsl/emit_wgsl.cpp b/src/shader_recompiler/backend/wgsl/emit_wgsl.cpp
+--- a/src/shader_recompiler/backend/wgsl/emit_wgsl.cpp
++++ b/src/shader_recompiler/backend/wgsl/emit_wgsl.cpp
+@@ -454,7 +454,7 @@
+     if(id.x>=min(draw_info.tess_draw.x*draw_info.tess_draw.y,arrayLength(&tess_patches)) || draw_info.tess_draw.x==0u) { return; }
+     tess_patch_index=id.x;
+     let primitive=id.x%draw_info.tess_draw.x;
+-    let instance=id.x/draw_info.tess_draw.x+draw_info.base_instance;
++    let instance=id.x/draw_info.tess_draw.x+draw_info.padding;
+     tess_patches[id.x].outer=draw_info.tess_outer;
+     tess_patches[id.x].inner=draw_info.tess_inner;
+     var input:s0_VSInput; input.instance_index=instance;
+@@ -467,7 +467,7 @@
+             }
+             text += "for(var i=0u;i<4u;i++){s2_tess_outer[i]=tess_patches[id.x].outer[i];}\n"
+                     "for(var i=0u;i<2u;i++){s2_tess_inner[i]=tess_patches[id.x].inner[i];}\n"
+-                    "s2_v_primitive_id=primitive; s2_v_instance_id=instance;\n";
++                    "s2_v_primitive_id=primitive; s2_v_instance_id=instance-draw_info.base_instance;\n";
+         }
+         text += fmt::format("for(var k=0u;k<{}u;k++){{\n"
+                             "let address=u32(draw_info.render_area.w)/4u+primitive*{}u+k;\n"
+@@ -549,7 +549,7 @@
+ @vertex fn main(@builtin(vertex_index) index:u32)->TessOutput {
+     let record=tess_records[index];
+     s3_v_primitive_id=record.x%draw_info.tess_draw.x;
+-    s3_v_instance_id=record.x/draw_info.tess_draw.x+draw_info.base_instance;
++    s3_v_instance_id=record.x/draw_info.tess_draw.x+draw_info.padding-draw_info.base_instance;
+     let uv=bitcast<vec2<f32>>(record.yz);
+ )";
+     text += runtime_info.tess_primitive == TessPrimitive::Triangles
