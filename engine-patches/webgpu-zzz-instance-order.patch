@@ -96,3 +96,15 @@ diff --git a/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp b/src/shad
          }
          for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
              const AttributeType type{runtime_info.generic_input_types[index]};
+diff --git a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
+--- a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
+@@ -1244,7 +1244,8 @@
+ bool GraphicsPipeline::ReadsDrawParameters() const {
+     return std::ranges::any_of(stage_infos, [](const Shader::Info& info) {
+         return info.loads[Shader::IR::Attribute::BaseVertex] ||
+-               info.loads[Shader::IR::Attribute::BaseInstance];
++               info.loads[Shader::IR::Attribute::BaseInstance] ||
++               info.loads[Shader::IR::Attribute::InstanceId];
+     });
+ }

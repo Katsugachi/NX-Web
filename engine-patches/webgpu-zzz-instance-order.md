@@ -20,6 +20,8 @@ register state. An `InstanceSingle` draw mode distinguishes the native fetch
 offset (guest base plus logical instance cursor) from the guest BaseInstance
 shader value. WebGPU preserves the latter in DrawInfo, and WGSL computes guest
 InstanceId as `instance_index - base_instance`, matching the SPIR-V backend.
+InstanceId-only shaders also require per-command base-instance copies for
+indirect and multidraw submissions; `ReadsDrawParameters` includes that input.
 Immediate array-instance commands likewise no longer leave a deferred batch
 behind. Native backend batching is unchanged. HLE macro draws that explicitly
 provide an instance count still use native instanced draws; raw/LLE instance
