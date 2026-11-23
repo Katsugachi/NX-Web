@@ -1,0 +1,113 @@
+diff --git a/src/audio_core/renderer/command/data_source/decode.cpp b/src/audio_core/renderer/command/data_source/decode.cpp
+index 0f6f782..c78e898 100644
+--- a/src/audio_core/renderer/command/data_source/decode.cpp
++++ b/src/audio_core/renderer/command/data_source/decode.cpp
+@@ -346,6 +346,23 @@ void DecodeFromWaveBuffers(Core::Memory::Memory& memory, const DecodeFromWaveBuf
+                 continue;
+             }
+ 
++#ifdef __EMSCRIPTEN__
++            // Keep an unobserved head buffer alive until the next client update.
++            const bool ends_wavebuffer =
++                !wavebuffer.loop ||
++                (wavebuffer.loop_count >= 0 &&
++                 (voice_state.loop_count + 1 > wavebuffer.loop_count || samples_decoded == 0));
++            if (ends_wavebuffer &&
++                wavebuffers_consumed != voice_state.observed_wave_buffers_consumed) {
++                is_buffer_starved = true;
++                break;
++            }
++            const bool released_hold =
++                samples_decoded == 0 && decode_arg.offset != 0 &&
++                decode_arg.offset >= end_offset - start_offset;
++#else
++            constexpr bool released_hold = false;
++#endif
+             offset = 0;
+             if (wavebuffer.loop) {
+                 voice_state.loop_count++;
+@@ -355,7 +372,7 @@ void DecodeFromWaveBuffers(Core::Memory::Memory& memory, const DecodeFromWaveBuf
+                                   wavebuffers_consumed);
+                 }
+ 
+-                if (samples_decoded == 0) {
++                if (samples_decoded == 0 && !released_hold) {
+                     is_buffer_starved = true;
+                     break;
+                 }
+diff --git a/src/audio_core/renderer/voice/voice_info.cpp b/src/audio_core/renderer/voice/voice_info.cpp
+index 6239cfa..60b1401 100644
+--- a/src/audio_core/renderer/voice/voice_info.cpp
++++ b/src/audio_core/renderer/voice/voice_info.cpp
+@@ -25,6 +25,9 @@ void VoiceInfo::Initialize() {
+     channel_count = 0;
+     wave_buffer_count = 0;
+     wave_buffer_index = 0;
++#ifdef __EMSCRIPTEN__
++    observed_wave_buffers_consumed = 0;
++#endif
+     pitch = 0.0f;
+     volume = 0.0f;
+     prev_volume = 0.0f;
+@@ -276,6 +279,9 @@ void VoiceInfo::WriteOutStatus(OutStatus& out_status, const InParameter& params,
+         out_status.wave_buffers_consumed = voice_states[0]->wave_buffers_consumed;
+         out_status.voice_dropped = voice_dropped;
+     }
++#ifdef __EMSCRIPTEN__
++    observed_wave_buffers_consumed = out_status.wave_buffers_consumed;
++#endif
+ }
+ 
+ bool VoiceInfo::ShouldSkip() const {
+@@ -299,6 +305,10 @@ void VoiceInfo::FlushWaveBuffers(const u32 flush_count, std::span<VoiceState*> v
+                 voice_state->wave_buffer_index =
+                     (voice_state->wave_buffer_index + 1) % MaxWaveBuffers;
+                 voice_state->wave_buffers_consumed++;
++#ifdef __EMSCRIPTEN__
++                voice_state->offset = 0;
++                voice_state->loop_count = 0;
++#endif
+             }
+             voice_state->wave_buffer_valid[wave_index] = false;
+         }
+@@ -308,6 +318,11 @@ void VoiceInfo::FlushWaveBuffers(const u32 flush_count, std::span<VoiceState*> v
+ }
+ 
+ bool VoiceInfo::UpdateParametersForCommandGeneration(std::span<VoiceState*> voice_states) {
++#ifdef __EMSCRIPTEN__
++    for (s8 channel = 0; channel < channel_count; channel++) {
++        voice_states[channel]->observed_wave_buffers_consumed = observed_wave_buffers_consumed;
++    }
++#endif
+     if (flush_buffer_count > 0) {
+         FlushWaveBuffers(flush_buffer_count, voice_states, channel_count);
+         flush_buffer_count = 0;
+diff --git a/src/audio_core/renderer/voice/voice_info.h b/src/audio_core/renderer/voice/voice_info.h
+index 595150f..2d75279 100644
+--- a/src/audio_core/renderer/voice/voice_info.h
++++ b/src/audio_core/renderer/voice/voice_info.h
+@@ -406,6 +406,10 @@ public:
+     bool use_float_biquads{};
+     /// Number of active wavebuffers
+     u32 wave_buffer_count{};
++#ifdef __EMSCRIPTEN__
++    /// Last completion count returned to the client by RequestUpdate.
++    u32 observed_wave_buffers_consumed{};
++#endif
+     /// Current playing wavebuffer index
+     u16 wave_buffer_index{};
+     /// Flags controlling decode behavior
+diff --git a/src/audio_core/renderer/voice/voice_state.h b/src/audio_core/renderer/voice/voice_state.h
+index c7aee16..3de55cf 100644
+--- a/src/audio_core/renderer/voice/voice_state.h
++++ b/src/audio_core/renderer/voice/voice_state.h
+@@ -45,6 +45,9 @@ struct VoiceState {
+     std::array<bool, MaxWaveBuffers> wave_buffer_valid;
+     /// Number of wavebuffers consumed, given back to the game
+     u32 wave_buffers_consumed;
++#ifdef __EMSCRIPTEN__
++    u32 observed_wave_buffers_consumed;
++#endif
+     /// History of samples, used for rate conversion
+ 
+     std::array<s16, MaxWaveBuffers * 2> sample_history;
