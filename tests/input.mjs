@@ -82,7 +82,7 @@ window.dispatchEvent(new Event('gamepadconnected'));
 assert.equal(buttons.get(Button.A),1,'label mode maps the bottom button to A');
 pads=[]; frame();
 assert.equal(buttons.get(Button.A),0);
-console.log('NX-Web input: all 25 defaults, remapping, diagonals, modal guards and gamepad connect/disconnect OK');
+console.log('NX-Web input: defaults, remapping, diagonals, modal guards and gamepad connect/disconnect OK');
 
 const rect = { left:100, top:50, width:800, height:600 };
 assert.deepEqual(touchscreenPosition(rect, 500, 350), [640, 360]);

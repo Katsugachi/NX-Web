@@ -4,6 +4,7 @@
 // each when multiplayer is on. Rumble the game asks for is played on the matching gamepad.
 
 import { ACTIONS, bindingKey, isKeyboardField, readBindings, usesNativeKeys } from './bindings.js';
+import { setupMotion } from './motion.js';
 import { setupTouchscreen } from './touchscreen.js';
 
 /// VirtualGamepad::VirtualButton ids in the engine.
@@ -58,6 +59,11 @@ export function setupInput(getModule) {
   const sent = Array.from({ length: MAX_PLAYERS }, emptyState);
   let sentModule = null;
   const isDialogOpen = () => Boolean(document.querySelector('dialog[open]'));
+  const motion = setupMotion({
+    acceptsInput: () => !document.hidden && !isDialogOpen() && Boolean(getModule()?._eden_set_motion),
+    wake: () => start(),
+    connect,
+  });
 
   function source(name, player = 0) {
     if (!sources.has(name)) sources.set(name, { player, ...emptyState() });
@@ -119,14 +125,17 @@ export function setupInput(getModule) {
     const held = ACTIONS.filter(action => !action.hotkey && [...heldKeys.values()].includes(bindings[action.id]));
     keyboard.buttons = new Set(held.filter(action => action.button).map(action => Button[action.button]));
     keyboard.sticks = [[0, 0], [0, 0]];
+    const tilt = [0, 0, 0];
     for (const action of held) {
       const direction = action.vector;
       if (direction) {
         keyboard.sticks[direction[0]][0] += direction[1];
         keyboard.sticks[direction[0]][1] += direction[2];
       }
+      if (action.motion) tilt[action.motion[0]] += action.motion[1];
     }
     flush();
+    motion.setKeys(tilt);
   }
   window.addEventListener('keydown', e => {
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || usesNativeKeys(e) || isDialogOpen()) return;
@@ -142,10 +151,14 @@ export function setupInput(getModule) {
     heldKeys.clear();
     updateKeyboard();
   }
-  window.addEventListener('blur', releaseKeyboard);
+  function releaseMotionInput() {
+    releaseKeyboard();
+    motion.release(getModule());
+  }
+  window.addEventListener('blur', releaseMotionInput);
   window.addEventListener('nx-release-input', () => {
     clearGamepadInput();
-    releaseKeyboard();
+    releaseMotionInput();
   });
   document.addEventListener('focusin', event => { if (isKeyboardField(event.target)) releaseKeyboard(); });
   window.addEventListener('nx-bindings', event => {
@@ -229,13 +242,14 @@ export function setupInput(getModule) {
       pad.sticks[1] = [axis(rx), -axis(ry)];
     });
     flush();
+    const trackMotion = motion.update(getModule(), pads, padPlayer, !document.hidden && !isDialogOpen());
     playRumble(pads);
     const seen = pads.map(pad => `${pad.index}:${pad.id}:${pad.mapping}`).join('|') + `|${prefs.multiplayer}`;
     if (seen !== padsSeen) {
       padsSeen = seen;
       listeners.forEach(listener => listener(describe(pads)));
     }
-    polling = pads.length > 0;
+    polling = pads.length > 0 || trackMotion;
     if (!polling) return;
     if (document.hidden) setTimeout(poll, 16);
     else requestAnimationFrame(poll);
@@ -282,11 +296,16 @@ export function setupInput(getModule) {
   const start = () => { if (!polling) poll(); };
   window.addEventListener('gamepadconnected', start);
   window.addEventListener('gamepaddisconnected', () => { if (!polling) poll(); });
-  document.addEventListener('visibilitychange', start);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) releaseMotionInput();
+    start();
+  });
   start();
 
   return {
     prefs,
+    needsMotionPermission: motion.needsPermission,
+    requestMotionPermission: motion.requestPermission,
     /// Calls `listener` with the connected gamepads now and whenever they or their players change.
     onChange(listener) {
       listeners.add(listener);
