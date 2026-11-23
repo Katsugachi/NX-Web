@@ -235,7 +235,7 @@
          for (const auto& desc : info.texture_descriptors) {
              for (u32 index = 0; index < desc.count; ++index) {
                  const u32 index_offset{index << desc.size_shift};
-@@ -1304,6 +1346,24 @@
+@@ -1304,6 +1346,23 @@
          }
      }
      texture_cache.FillImageViews(std::span(views.data(), views.size()), false, false);
@@ -250,7 +250,6 @@
 +            if (!GetTexelBufferFormat(view.format)) {
 +                LOG_ERROR(Render, "WebGPU pipeline {:016x}: unsupported texel buffer format {}",
 +                          key.Hash(), static_cast<u32>(view.format));
-+                valid = false;
 +                return false;
 +            }
 +            buffer_cache.BindGraphicsTextureBuffer(stage, index, view.GpuAddr(), view.BufferSize(),
@@ -260,7 +259,7 @@
 
      buffer_cache.UpdateGraphicsBuffers(is_indexed);
      buffer_cache.BindHostGeometryBuffers(is_indexed);
-@@ -1475,6 +1535,23 @@
+@@ -1475,6 +1534,23 @@
                  }
                  (writable ? written_buffers : read_buffers).push_back(bound.buffer.Get());
              }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import puppeteer from 'puppeteer-core';
 import { createServer } from '../scripts/serve.mjs';
+import './texel_buffer_contract.mjs';
 
 assert.ok(process.argv[2], 'Pass the captured shader_control_flow_tests output file');
 assert.ok(process.env.CHROME_PATH, 'Set CHROME_PATH to Chrome with SwiftShader support');
