@@ -184,7 +184,20 @@
                  if (IsTessellation()) {
                      storage += visibility == wgpu::ShaderStage::Compute ? 3
                                 : visibility == wgpu::ShaderStage::Vertex ? 2 : 0;
-@@ -1267,6 +1285,7 @@
+@@ -1263,10 +1281,20 @@
+         }
+     }
+     auto* const maxwell3d = cache.maxwell3d;
++    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
++        if (enabled_stages[stage] &&
++            !FitsTexelBufferBindings(stage_infos[stage].texture_buffer_descriptors,
++                                     VideoCommon::NUM_TEXTURE_BUFFERS)) {
++            LOG_ERROR(Render, "WebGPU pipeline {:016x}: too many texel buffer bindings", key.Hash());
++            valid = false;
++            return false;
++        }
++    }
+     auto* const gpu_memory = cache.gpu_memory;
      const auto& regs{maxwell3d->regs};
 
      boost::container::small_vector<VideoCommon::ImageViewInOut, 32> views;
@@ -192,7 +205,7 @@
      boost::container::small_vector<VideoCommon::SamplerId, 32> samplers;
 
      texture_cache.SynchronizeDescriptors(false);
-@@ -1286,6 +1305,20 @@
+@@ -1286,6 +1314,20 @@
              ++ssbo_index;
          }
          const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
@@ -213,7 +226,7 @@
          for (const auto& desc : info.texture_descriptors) {
              for (u32 index = 0; index < desc.count; ++index) {
                  const u32 index_offset{index << desc.size_shift};
-@@ -1304,6 +1337,24 @@
+@@ -1304,6 +1346,24 @@
          }
      }
      texture_cache.FillImageViews(std::span(views.data(), views.size()), false, false);
@@ -238,7 +251,7 @@
 
      buffer_cache.UpdateGraphicsBuffers(is_indexed);
      buffer_cache.BindHostGeometryBuffers(is_indexed);
-@@ -1475,6 +1526,23 @@
+@@ -1475,6 +1535,23 @@
                  }
                  (writable ? written_buffers : read_buffers).push_back(bound.buffer.Get());
              }
@@ -313,16 +326,30 @@
      bool PrefersSparseSources() const noexcept {
 --- /dev/null
 +++ b/src/video_core/renderer_webgpu/wgpu_texel_buffer.h
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,116 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
 +#pragma once
 +
 +#include <optional>
++#include <span>
 +#include "common/common_types.h"
++#include "shader_recompiler/shader_info.h"
 +#include "video_core/surface.h"
 +
 +namespace WebGPU {
++
++inline bool FitsTexelBufferBindings(std::span<const Shader::TextureBufferDescriptor> descriptors,
++                                    u32 capacity) {
++    u32 count{};
++    for (const auto& desc : descriptors) {
++        if (desc.count > capacity - count) {
++            return false;
++        }
++        count += desc.count;
++    }
++    return true;
++}
 +
 +struct TexelBufferFormat {
 +    u32 bits;
@@ -428,13 +455,28 @@
 
 --- /dev/null
 +++ b/src/tests/video_core/webgpu_texel_buffer.cpp
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,63 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
 +#include <iostream>
++#include <limits>
 +#include <catch2/catch_test_macros.hpp>
 +#include "shader_recompiler/backend/wgsl/wgsl_emit_context.h"
 +#include "video_core/renderer_webgpu/wgpu_texel_buffer.h"
++
++TEST_CASE("WebGPU texel arrays fit the fixed cache before binding", "[shader][texel-buffer]") {
++    std::array<Shader::TextureBufferDescriptor, 2> descriptors{};
++    CHECK(WebGPU::FitsTexelBufferBindings({}, 32));
++    descriptors[0].count = 32;
++    CHECK(WebGPU::FitsTexelBufferBindings(descriptors, 32));
++    descriptors[0].count = 33;
++    CHECK_FALSE(WebGPU::FitsTexelBufferBindings(descriptors, 32));
++    descriptors[0].count = 16;
++    descriptors[1].count = 17;
++    CHECK_FALSE(WebGPU::FitsTexelBufferBindings(descriptors, 32));
++    descriptors[0].count = std::numeric_limits<u32>::max();
++    CHECK_FALSE(WebGPU::FitsTexelBufferBindings(descriptors, 32));
++}
 +
 +TEST_CASE("WebGPU texel buffer format layouts", "[shader][texel-buffer]") {
 +    using VideoCore::Surface::PixelFormat;
