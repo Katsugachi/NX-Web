@@ -626,6 +626,7 @@ function showRuntimeInfo(state) {
 function pollStatus() {
   if (!edenModule || crashed || memoryUnavailable || bootStalled) return;
   const state = edenModule._eden_get_state();
+  if (state === 2) bootWatchdog.stop();
   const runtimeStats = showRuntimeInfo(state);
   const name = EmuState[state] || `State ${state}`;
   wasmState.textContent = name;
@@ -665,7 +666,7 @@ function pollStatus() {
   const finite = (value) => (Number.isFinite(value) ? value : 0);
   const gameFps = finite(edenModule._eden_get_game_fps());
   // Running is reported as soon as the core starts; the game is loaded once it draws a frame.
-  if (state === 2 && gameFps > 0) { loader.finish(); bootWatchdog.stop(); }
+  if (state === 2 && gameFps > 0) loader.finish();
   watchFrames(state, gameFps, runtimeStats?.frames);
   const speed = finite(edenModule._eden_get_emulation_speed()) * 100;
   fpsCounter.textContent = playerFps(state, gameFps);

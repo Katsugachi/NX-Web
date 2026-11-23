@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { runInNewContext } from 'node:vm';
 import { createFrameWatchdog, createBootWatchdog, bootTimeoutMs } from '../web/frame-watchdog.js';
 
 for (const value of [null, '', 'bad', 'Infinity', '-1', '0']) assert.equal(bootTimeoutMs(value), 90_000);
@@ -23,7 +25,22 @@ bootWatch.start('next');
 bootWatch.stop();
 bootTime = 500;
 bootWatch.tick();
-assert.deepEqual(stalls, ['first'], 'a first frame, exit, failure or crash cancels the deadline');
+assert.deepEqual(stalls, ['first'], 'stopping the boot watchdog cancels the deadline');
+
+const appSource = await readFile(new URL('../web/app.js', import.meta.url), 'utf8');
+const pollStart = appSource.slice(appSource.indexOf('function pollStatus()'), appSource.indexOf('  const runtimeStats = showRuntimeInfo(state);'));
+for (const state of [0, 1, 2]) {
+  const observed = [];
+  const boot = createBootWatchdog({ timeoutMs: 100, now: () => bootTime, onStall: file => observed.push(file) });
+  boot.start('no-frames');
+  runInNewContext(`${pollStart}}; pollStatus();`, {
+    edenModule: { _eden_get_state: () => state, _eden_get_game_fps: () => 0 },
+    crashed: false, memoryUnavailable: false, bootStalled: false, bootWatchdog: boot,
+  });
+  bootTime += 101;
+  boot.tick();
+  assert.deepEqual(observed, state === 2 ? [] : ['no-frames'], 'Running cancels boot detection even with zero FPS; pre-Running remains covered');
+}
 
 let time = 0;
 const freezes = [];
@@ -33,7 +50,7 @@ const watch = createFrameWatchdog({ timeoutMs: 45_000, now: () => time,
 watch(2, 0, 0);
 time = 60_000;
 watch(2, 0, 0);
-assert.equal(freezes.length, 0, 'booting without a first frame does not count as a freeze');
+assert.equal(freezes.length, 0, 'Running without a first frame does not count as a freeze');
 watch(2, 60, 1);
 assert.equal(first, 1);
 time += 46_000;
