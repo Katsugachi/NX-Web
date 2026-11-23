@@ -34,6 +34,7 @@ const exitSource = appSource.slice(appSource.indexOf('async function onGuestExit
 for (const mode of ['saved', 'empty', 'error']) {
   const exitCalls = [];
   const scope = {
+    bootWatchdog: { stop() {} },
     stopSaveWatch: mode === 'empty' ? null : async () => {
       exitCalls.push('save');
       if (mode === 'error') throw new Error('storage blocked');
@@ -87,6 +88,21 @@ const stash = runInNewContext(`${stashSource}; ({ stashGameFile, resumeAfterCras
   resumeDir: async () => ({ getFileHandle: async () => handle }),
   handleFile: async file => { resumedFile = file; }, log() {}, setRomStatus(message) { assert.fail(message); },
 });
+const retrySource = appSource.slice(appSource.indexOf('async function reloadStuckBoot('), appSource.indexOf("window.addEventListener('nx-retry-boot'"));
+for (const failed of [null, 'stash', 'marker']) {
+  const retries = [];
+  const scope = {
+    bootStalled: true, bootRetrying: false, stalledBootFile: file, RESUME_KEY: 'eden-resume', romStatus: {},
+    stashGameFile: async selected => { assert.equal(selected, file); retries.push('stash'); if (failed === 'stash') throw new Error('quota'); },
+    sessionStorage: { setItem(key, value) { assert.equal(key, 'eden-resume'); assert.equal(JSON.parse(value).boot, true); retries.push('marker'); if (failed === 'marker') throw new Error('blocked'); } },
+    location: { reload: () => retries.push('reload') },
+  };
+  const retry = runInNewContext(`${retrySource}; reloadStuckBoot;`, scope);
+  await retry();
+  assert.deepEqual(retries, failed === 'stash' ? ['stash'] : failed === 'marker' ? ['stash', 'marker'] : ['stash', 'marker', 'reload']);
+  if (failed) { assert.match(scope.romStatus.textContent, /Could not prepare the reload/); assert.equal(scope.bootRetrying, false); }
+  else { await retry(); assert.equal(retries.length, 3, 'a double click must not schedule two reloads'); }
+}
 await stash.resumeAfterCrash();
 for (const failed of ['preserve', 'mark']) {
   await assert.rejects(rebootGame(resumedFile, {

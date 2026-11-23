@@ -245,7 +245,7 @@ function updateState() {
   const problem = runtimeProblem(state);
   $('runtime-problem').hidden = !problem;
   $('runtime-problem').textContent = problem;
-  if (['Booting','Running','Paused','Failed','Crashed','Stopped','Exited'].includes(state)) {
+  if (['Booting','Running','Paused','Failed','Crashed','Stopped','Exited','Stuck'].includes(state)) {
     $('library').hidden = true; $('player').hidden = false; document.body.classList.add('playing');
   }
   const paused = state === 'Paused';
@@ -255,7 +255,14 @@ function updateState() {
   }
   $('toggle-pause').disabled = !['Running','Paused'].includes(state);
   $('player-message').hidden = ['Running','Paused'].includes(state);
-  $('player-message').textContent = ['Failed','Crashed','Exited'].includes(state) ? $('rom-status').textContent : `${state}…`;
+  $('player-message').textContent = ['Failed','Crashed','Exited','Stuck'].includes(state) ? $('rom-status').textContent : `${state}…`;
+  if (state === 'Stuck') {
+    const reload = document.createElement('button');
+    reload.id = 'boot-reload';
+    reload.textContent = 'Reload and retry';
+    reload.addEventListener('click', () => window.dispatchEvent(new Event('nx-retry-boot')));
+    $('player-message').append(document.createElement('br'), reload);
+  }
   if (state !== previousState) { previousState = state; showBar(); }
 }
 let previousState;

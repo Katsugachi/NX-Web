@@ -3,7 +3,8 @@
 // MODE=new-tab closes each old tab. Both modes retain the same on-disk Chrome profile.
 // Reuse PROFILE_DIR and PORT across runs; CLEAR_STORAGE explicitly deletes only the named kind.
 // Opt-in SCENARIO: concurrent (CONCURRENT_STAGE=running|booting), close-boot,
-// navigate-boot, runtime-touch (changes local runtime mtimes/manifest), guest-exit, guest-crash.
+// navigate-boot, runtime-touch (changes local runtime mtimes/manifest), guest-exit, guest-crash, boot-stall.
+// SAVE_COUNTER_KEY=sdmc/nxweb-counter.txt verifies a homebrew increments its persisted counter each launch.
 // RECOVER=1 records a failure, restarts only the server, then Chrome with the same profile.
 // REQUIRE_FRAME_PROGRESS=1 checks the dwell window too; CONTINUE_ON_FAILURE=1 tests remaining ROMs.
 // GUEST_AUTO_RESTART=1 leaves the UI's automatic crash recovery enabled for guest-exit.
@@ -22,7 +23,7 @@ const timeout = Number(process.env.BOOT_TIMEOUT_MS ?? 120_000);
 const dwell = Number(process.env.DWELL_MS ?? 5000);
 const mode = process.env.MODE ?? 'same-tab';
 const scenario = process.env.SCENARIO ?? 'sequential';
-assert.ok(['sequential', 'concurrent', 'close-boot', 'navigate-boot', 'runtime-touch', 'guest-exit', 'guest-crash'].includes(scenario), 'Invalid SCENARIO');
+assert.ok(['sequential', 'concurrent', 'close-boot', 'navigate-boot', 'runtime-touch', 'guest-exit', 'guest-crash', 'boot-stall'].includes(scenario), 'Invalid SCENARIO');
 const recover = process.env.RECOVER === '1';
 assert.ok(['same-tab', 'new-tab'].includes(mode), 'MODE must be same-tab or new-tab');
 assert.ok(Number.isInteger(launches) && launches > 0);
@@ -89,6 +90,9 @@ async function openPage() {
 }
 async function instrument(page) {
   await page.evaluateOnNewDocument(() => {
+    if (new URLSearchParams(location.search).get('bootTimeoutMs') === '50' && navigator.gpu) {
+      navigator.gpu.requestAdapter = () => new Promise(() => {});
+    }
     window.__repeatLaunchGpu = [];
     for (const [target, name] of [[navigator.gpu, 'requestAdapter'], [globalThis.GPUAdapter?.prototype, 'requestDevice']]) {
       if (!target?.[name]) continue;
@@ -224,7 +228,18 @@ try {
       if (['guest-exit', 'guest-crash'].includes(scenario) && process.env.GUEST_AUTO_RESTART !== '1') {
         await page.$eval('#auto-restart', el => { el.checked = false; });
       }
+      if (scenario === 'boot-stall') await page.goto(`${origin}/?bootTimeoutMs=50`);
       await select(page, rom);
+      if (scenario === 'boot-stall') {
+        await page.waitForSelector('#boot-reload', { visible: true, timeout });
+        row.stuckBoot = await ui(page);
+        assert.equal(row.stuckBoot.state, 'Stuck');
+        assert.match(row.stuckBoot.romStatus, /Boot appears stuck/);
+        await page.evaluate(() => history.replaceState(null, '', location.pathname));
+        await Promise.all([page.waitForNavigation(), page.click('#boot-reload')]);
+        await frames(page);
+        row.bootRecovery = await ui(page);
+      }
       if (['close-boot', 'navigate-boot'].includes(scenario)) {
         await page.waitForFunction(() => document.querySelector('#wasm-state')?.textContent === 'Booting', { polling: 10, timeout });
         row.interrupted = { ui: await ui(page), storage: await storage(page) };
@@ -243,15 +258,17 @@ try {
         const probe = await openPage();
         await probe.waitForFunction(() => document.querySelector('#session-lock')?.textContent.includes('already open'), { timeout });
         await select(probe, rom, false);
+        if (roms.length > 1) await select(probe, roms[launch % roms.length], false);
         await pause(1000);
         row.blockedProbe = { ui: await ui(probe), storage: await storage(probe) };
         await restartServer();
         row.blockedAfterServerRestart = { ui: await ui(probe), storage: await storage(probe) };
         await owner.close();
-        await probe.waitForFunction(() => document.querySelector('#wasm-status-text')?.textContent === 'WASM Core Ready', { timeout });
+        await frames(probe);
+        const expectedRom = roms.length > 1 ? roms[launch % roms.length] : rom;
+        assert.match((await ui(probe)).romStatus, new RegExp(path.basename(expectedRom).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
         row.probeAfterOwnerClosed = { ui: await ui(probe), storage: await storage(probe) };
-        await probe.$eval('#file-input', el => { el.value = ''; });
-        await select(probe, rom);
+        row.automaticLaunch = true;
         page = probe;
       }
       try {
@@ -301,6 +318,23 @@ try {
       }
       if (row.result === 'timeout' && row.state === 'Booting') row.result = 'stuck-booting';
       row.storage = await storage(page);
+      if (process.env.SAVE_COUNTER_KEY) {
+        row.saveCounter = await page.evaluate(async key => {
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open('eden-recovery');
+            request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+          });
+          try {
+            const value = await new Promise((resolve, reject) => {
+              const request = db.transaction('saves').objectStore('saves').get(key);
+              request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+            });
+            return Number(await value?.text());
+          } finally { db.close(); }
+        }, process.env.SAVE_COUNTER_KEY);
+        assert.ok(Number.isFinite(row.saveCounter), 'counter must have reached IndexedDB');
+        if (results.length) assert.equal(row.saveCounter, results.at(-1).saveCounter + 1, 'each launch must restore and increment the saved counter');
+      }
       row.metrics = await page.metrics();
       row.workers = page.workers().map(w => w.url());
       row.memory.push({ time: Date.now(), processes: await memory() });
@@ -345,6 +379,9 @@ try {
     await save();
     console.log(`| ${launch} | ${mode} | ${path.basename(rom)} | ${row.result} | ${row.state ?? '-'} | ${row.fps ?? '-'} | ${row.ms} | ${row.storage?.estimate.usage ?? '-'} | ${row.storage?.opfs.reduce((sum, f) => sum + f.bytes, 0) ?? '-'} |`);
     if (['guest-exit', 'guest-crash'].includes(scenario)) console.log(`Guest exit ${launch}: ${row.exitResult ?? 'failed'}; next launch: ${row.nextLaunch?.state ?? 'not reached'}`);
+    if (scenario === 'concurrent') console.log(`Automatic probe launch ${launch}: ${row.automaticLaunch ? 'Running' : 'failed'}`);
+    if (scenario === 'boot-stall') console.log(`Boot watchdog ${launch}: ${row.stuckBoot?.state ?? 'failed'} -> Reload -> ${row.bootRecovery?.state ?? 'failed'}`);
+    if (process.env.SAVE_COUNTER_KEY) console.log(`Save counter ${launch}: ${row.saveCounter}`);
     if (row.result !== 'running-frames') {
       process.exitCode = 1;
       if (process.env.CONTINUE_ON_FAILURE !== '1') break;

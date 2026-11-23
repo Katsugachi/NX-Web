@@ -1,6 +1,31 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import assert from 'node:assert/strict';
-import { acquireSession } from '../web/session-lock.js';
+import { acquireSession, createSessionLaunch } from '../web/session-lock.js';
+
+const selections = [];
+const pendingFiles = [];
+const queued = createSessionLaunch({ launch: file => selections.push(file), onPending: file => pendingFiles.push(file) });
+queued.select(null);
+queued.select('first');
+queued.setOwned(false);
+queued.select('latest');
+assert.deepEqual(selections, []);
+assert.deepEqual(pendingFiles, ['first', 'latest']);
+queued.setOwned(true);
+assert.deepEqual(selections, ['latest'], 'only the latest selection survives checking/blocked');
+queued.setOwned(true);
+assert.deepEqual(selections, ['latest'], 'ownership notifications cannot replay a launch');
+queued.select('owned');
+assert.deepEqual(selections, ['latest', 'owned']);
+queued.setOwned(false);
+queued.select('waiting');
+assert.deepEqual(selections, ['latest', 'owned'], 'losing ownership gates launches again');
+queued.setOwned(true);
+assert.deepEqual(selections, ['latest', 'owned', 'waiting']);
+const deniedLaunch = createSessionLaunch({ launch: async () => { throw new Error('invalid file'); }, onPending() {} });
+deniedLaunch.select('bad');
+await assert.rejects(deniedLaunch.setOwned(true), /invalid file/);
+assert.equal(deniedLaunch.setOwned(true), undefined, 'a failed launch is not replayed');
 
 const statuses = [];
 assert.equal(await acquireSession(status => statuses.push(status), null), true);

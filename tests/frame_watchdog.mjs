@@ -1,6 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import assert from 'node:assert/strict';
-import { createFrameWatchdog } from '../web/frame-watchdog.js';
+import { createFrameWatchdog, createBootWatchdog, bootTimeoutMs } from '../web/frame-watchdog.js';
+
+for (const value of [null, '', 'bad', 'Infinity', '-1', '0']) assert.equal(bootTimeoutMs(value), 90_000);
+assert.equal(bootTimeoutMs('15'), 15);
+let bootTime = 0;
+const stalls = [];
+const bootWatch = createBootWatchdog({ timeoutMs: 100, now: () => bootTime, onStall: file => stalls.push(file) });
+bootWatch.tick();
+assert.deepEqual(stalls, []);
+bootWatch.start('first');
+bootTime = 90;
+bootWatch.progress();
+bootTime = 180;
+bootWatch.tick();
+assert.deepEqual(stalls, [], 'engine output or copying progress extends the boot deadline');
+bootTime = 190;
+bootWatch.tick();
+bootWatch.tick();
+assert.deepEqual(stalls, ['first'], 'a stalled boot is reported once');
+bootWatch.start('next');
+bootWatch.stop();
+bootTime = 500;
+bootWatch.tick();
+assert.deepEqual(stalls, ['first'], 'a first frame, exit, failure or crash cancels the deadline');
 
 let time = 0;
 const freezes = [];
