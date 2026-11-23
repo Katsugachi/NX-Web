@@ -30,7 +30,20 @@
 
  std::atomic<int> g_state{int(EmuState::Idle)};
  std::atomic<int> g_load_result{0};
-@@ -536,6 +546,23 @@
+@@ -225,6 +235,12 @@
+
+         // Controllers bind to their input devices when the application is loaded.
+         system.HIDCore().ReloadInputDevices();
++        // Seed idle gravity after binding and before the guest can read the sensor.
++        auto* const gamepad = input_subsystem.GetVirtualGamepad();
++        for (std::size_t player = 0; player < g_pending_motion.size(); ++player) {
++            gamepad->SetMotionState(player, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f);
++        }
++
+         CacheGameInfo(path);
+         system.GPU().Start();
+         system.GetCpuManager().OnGpuReady();
+@@ -536,6 +552,23 @@
                   .y = std::clamp(y / 720.0f, 0.0f, 1.0f)});
  }
 
@@ -54,7 +67,7 @@
  /// Connects (1) or disconnects (0) a Pro Controller for player 2 to 8 (index 1 to 7).
  EMSCRIPTEN_KEEPALIVE void eden_set_player_connected(int player, int connected) {
      PushRequest({.kind = Request::Kind::Connect, .player = player, .pressed = connected != 0});
-@@ -934,14 +961,18 @@
+@@ -934,14 +967,18 @@
 
      for (;;) {
          std::optional<Request> request;
@@ -74,7 +87,7 @@
              }
          }
 
-@@ -988,6 +1019,16 @@
+@@ -988,6 +1025,16 @@
              }
          }
 
