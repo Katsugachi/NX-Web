@@ -1,0 +1,160 @@
+--- a/src/video_core/renderer_webgpu/wgpu_blit.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_blit.cpp
+@@ -28,22 +28,8 @@
+ }
+ )";
+
+-bool IsDepthFormat(wgpu::TextureFormat format) {
+-    switch (format) {
+-    case wgpu::TextureFormat::Depth16Unorm:
+-    case wgpu::TextureFormat::Depth24Plus:
+-    case wgpu::TextureFormat::Depth24PlusStencil8:
+-    case wgpu::TextureFormat::Depth32Float:
+-    case wgpu::TextureFormat::Depth32FloatStencil8:
+-    case wgpu::TextureFormat::Stencil8:
+-        return true;
+-    default:
+-        return false;
+-    }
+-}
+-
+ std::string FragmentShader(wgpu::TextureFormat dst_format, TextureKind kind) {
+-    const bool depth_dst = IsDepthFormat(dst_format);
++    const bool depth_dst = HasDepthAspect(dst_format);
+     std::string code = VERTEX;
+     switch (kind) {
+     case TextureKind::Depth:
+@@ -173,7 +159,7 @@
+     fragment.module = module;
+     fragment.entryPoint = "fs";
+     wgpu::DepthStencilState depth{};
+-    if (IsDepthFormat(dst_format)) {
++    if (HasDepthAspect(dst_format)) {
+         depth.format = dst_format;
+         depth.depthWriteEnabled = wgpu::OptionalBool::True;
+         depth.depthCompare = wgpu::CompareFunction::Always;
+@@ -192,6 +178,10 @@
+                    const wgpu::TextureView& src, TextureKind src_kind, u32 src_width,
+                    u32 src_height, const VideoCommon::Region2D& src_region, bool linear) {
+     if (!dst || !src || dst_width == 0 || dst_height == 0 || src_width == 0 || src_height == 0) {
++        return;
++    }
++    if (HasStencilAspect(dst_format) && !HasDepthAspect(dst_format)) {
++        LOG_WARNING(Render, "Stencil-only shader blits are unsupported");
+         return;
+     }
+     // Flipped destination regions are expressed by flipping the source coordinates.
+@@ -244,7 +234,7 @@
+     const wgpu::BindGroup bind_group = Thread::Get().device.CreateBindGroup(&bind_desc);
+
+     RenderTargets targets{};
+-    if (IsDepthFormat(dst_format)) {
++    if (HasDepthAspect(dst_format)) {
+         targets.depth_stencil = dst;
+         targets.depth_format = dst_format;
+         targets.has_stencil = HasStencilAspect(dst_format);
+--- a/src/video_core/renderer_webgpu/wgpu_formats.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_formats.cpp
+@@ -244,6 +244,14 @@
+     }
+ }
+
++bool HasDepthAspect(wgpu::TextureFormat format) {
++    return format == wgpu::TextureFormat::Depth16Unorm ||
++           format == wgpu::TextureFormat::Depth24Plus ||
++           format == wgpu::TextureFormat::Depth32Float ||
++           format == wgpu::TextureFormat::Depth24PlusStencil8 ||
++           format == wgpu::TextureFormat::Depth32FloatStencil8;
++}
++
+ bool HasStencilAspect(wgpu::TextureFormat format) {
+     return format == wgpu::TextureFormat::Depth24PlusStencil8 ||
+            format == wgpu::TextureFormat::Depth32FloatStencil8 ||
+--- a/src/video_core/renderer_webgpu/wgpu_formats.h
++++ b/src/video_core/renderer_webgpu/wgpu_formats.h
+@@ -54,4 +54,6 @@
+ /// Whether a host format has a stencil aspect (render passes then need stencil load/store ops).
+ bool HasStencilAspect(wgpu::TextureFormat format);
+
++bool HasDepthAspect(wgpu::TextureFormat format);
++
+ } // namespace WebGPU
+--- a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
+@@ -1105,12 +1105,17 @@
+         wgpu::DepthStencilState depth_stencil{};
+         if (variant_key.depth_format != wgpu::TextureFormat::Undefined) {
+             depth_stencil.format = variant_key.depth_format;
+-            depth_stencil.depthWriteEnabled = dynamic.depth_test_enable && dynamic.depth_write_enable
+-                                                  ? wgpu::OptionalBool::True
+-                                                  : wgpu::OptionalBool::False;
+-            depth_stencil.depthCompare = dynamic.depth_test_enable
+-                                             ? MaxwellToWGPU::Compare(dynamic.DepthTestFunc())
+-                                             : wgpu::CompareFunction::Always;
++            // Emdawnwebgpu converts OptionalBool::Undefined to true.
++            depth_stencil.depthWriteEnabled = wgpu::OptionalBool::False;
++            if (HasDepthAspect(variant_key.depth_format)) {
++                depth_stencil.depthWriteEnabled =
++                    dynamic.depth_test_enable && dynamic.depth_write_enable
++                        ? wgpu::OptionalBool::True
++                        : wgpu::OptionalBool::False;
++                depth_stencil.depthCompare = dynamic.depth_test_enable
++                                                 ? MaxwellToWGPU::Compare(dynamic.DepthTestFunc())
++                                                 : wgpu::CompareFunction::Always;
++            }
+             if (HasStencilAspect(variant_key.depth_format) && dynamic.stencil_enable) {
+                 const auto face = [](const auto& f) {
+                     wgpu::StencilFaceState s{};
+@@ -1125,7 +1130,7 @@
+                 depth_stencil.stencilReadMask = variant_key.stencil_masks & 0xFF;
+                 depth_stencil.stencilWriteMask = (variant_key.stencil_masks >> 8) & 0xFF;
+             }
+-            if (dynamic.depth_bias_enable) {
++            if (HasDepthAspect(variant_key.depth_format) && dynamic.depth_bias_enable) {
+                 depth_stencil.depthBias = static_cast<s32>(std::bit_cast<f32>(variant_key.depth_bias[0]));
+                 depth_stencil.depthBiasSlopeScale = std::bit_cast<f32>(variant_key.depth_bias[1]);
+                 depth_stencil.depthBiasClamp = std::bit_cast<f32>(variant_key.depth_bias[2]);
+--- a/src/video_core/renderer_webgpu/wgpu_scheduler.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_scheduler.cpp
+@@ -3,6 +3,7 @@
+
+ #include <algorithm>
+
++#include "video_core/renderer_webgpu/wgpu_formats.h"
+ #include "video_core/renderer_webgpu/wgpu_scheduler.h"
+ #include "video_core/renderer_webgpu/wgpu_thread.h"
+
+@@ -54,18 +55,28 @@
+         }
+     }
+     wgpu::RenderPassDepthStencilAttachment depth{};
++    // Emdawnwebgpu marshals this value even when the depth aspect is absent.
++    depth.depthClearValue = 0.0f;
+     wgpu::RenderPassDescriptor desc{};
+     desc.colorAttachmentCount = num_colors;
+     desc.colorAttachments = colors.data();
+     if (targets.depth_stencil) {
+         depth.view = targets.depth_stencil;
+-        depth.depthLoadOp = clear && clear->depth ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load;
+-        depth.depthStoreOp = wgpu::StoreOp::Store;
+-        depth.depthClearValue = clear ? clear->depth_value : 0.0f;
+-        if (targets.has_stencil) {
++        if (HasDepthAspect(targets.depth_format)) {
++            depth.depthLoadOp = clear && clear->depth ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load;
++            depth.depthStoreOp = wgpu::StoreOp::Store;
++            depth.depthReadOnly = false;
++            if (clear && clear->depth) {
++                depth.depthClearValue = clear->depth_value;
++            }
++        }
++        if (HasStencilAspect(targets.depth_format)) {
+             depth.stencilLoadOp = clear && clear->stencil ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load;
+             depth.stencilStoreOp = wgpu::StoreOp::Store;
+-            depth.stencilClearValue = clear ? clear->stencil_value : 0;
++            depth.stencilReadOnly = false;
++            if (clear && clear->stencil) {
++                depth.stencilClearValue = clear->stencil_value;
++            }
+         }
+         desc.depthStencilAttachment = &depth;
+     }
