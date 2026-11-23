@@ -26,7 +26,7 @@ function devicePose({ alpha, beta, gamma }) {
     [0, Math.sin(c), 0, Math.cos(c)]);
 }
 function poseRate(previous, current, elapsed) {
-  if (!previous || elapsed <= 0 || elapsed > FRESH_MS) return ZERO;
+  if (!previous || elapsed <= 0 || elapsed > 100) return ZERO;
   const delta = multiply(conjugate(previous), current);
   const sinHalf = Math.hypot(...delta.slice(0, 3));
   if (sinHalf < 1e-8) return ZERO;
@@ -71,7 +71,8 @@ export function setupMotion({ acceptsInput, wake, connect }) {
     const now = performance.now();
     const elapsed = now - (orientation?.at ?? -Infinity);
     orientation = { pose, at:now, gyro:poseRate(orientation?.pose, pose, elapsed),
-      gyroUntil:now + Math.min(80, 2 * elapsed), accel:toLocal(REST, pose) };
+      deltaUs:elapsed > 0 && elapsed <= 100 ? Math.round(elapsed * 1000) : 0,
+      accel:toLocal(REST, pose) };
     wake();
   });
   window.addEventListener('devicemotion', event => {
@@ -89,9 +90,12 @@ export function setupMotion({ acceptsInput, wake, connect }) {
     const recent = device && now - device.at < FRESH_MS ? device : null;
     if (!recent && !orientation) return null;
     const gravity = orientation?.accel ?? REST;
+    const poseDelta = !recent?.gyro && orientation?.deltaUs && now - orientation.at <= 100
+      ? orientation : null;
     return {
-      gyro: recent?.gyro ?? (now < orientation?.gyroUntil ? orientation.gyro : ZERO),
+      gyro: recent?.gyro ?? poseDelta?.gyro ?? ZERO,
       accel: recent?.accel ?? gravity.map((value, axis) => value + (recent?.linear?.[axis] ?? 0)),
+      poseDelta,
     };
   }
 
@@ -121,7 +125,7 @@ export function setupMotion({ acceptsInput, wake, connect }) {
     for (const player of last.keys()) {
       if (!samples.has(player)) samples.set(player, { source:'rest', gyro:ZERO, accel:REST });
     }
-    for (const [player, { source, gyro, accel }] of samples) {
+    for (const [player, { source, gyro, accel, poseDelta }] of samples) {
       if (player > 0 && source !== 'rest') connect(module, player);
       const previous = last.get(player);
       const elapsed = now - (previous?.at ?? now);
@@ -130,7 +134,9 @@ export function setupMotion({ acceptsInput, wake, connect }) {
         continue;
       }
       const dt = previous?.source === source && elapsed <= 100 ? Math.round(elapsed * 1000) : 0;
-      send(player, dt, gyro, accel);
+      // An orientation event describes rotation that already happened, not a sustained rate.
+      send(player, poseDelta?.deltaUs ?? dt, gyro, accel);
+      if (poseDelta) poseDelta.deltaUs = 0;
       samples.set(player, { source, at:now });
     }
     last = samples;
