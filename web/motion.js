@@ -117,11 +117,15 @@ export function setupMotion({ acceptsInput, wake, connect }) {
     }
     const send = (player, dt, gyro, accel) => module._eden_set_motion(player, dt,
       ...[...gyro, ...accel].map(value => Math.max(-16, Math.min(16, value))));
+    // Keep feeding gravity after a source goes away so Eden's orientation filter can settle.
+    for (const player of last.keys()) {
+      if (!samples.has(player)) samples.set(player, { source:'rest', gyro:ZERO, accel:REST });
+    }
     for (const [player, { source, gyro, accel }] of samples) {
-      if (player > 0) connect(module, player);
+      if (player > 0 && source !== 'rest') connect(module, player);
       const previous = last.get(player);
       const elapsed = now - (previous?.at ?? now);
-      if (previous?.source === source && elapsed < 8) {
+      if (previous?.source === source && elapsed < (source === 'rest' ? 16 : 8)) {
         samples.set(player, previous);
         continue;
       }
@@ -129,7 +133,6 @@ export function setupMotion({ acceptsInput, wake, connect }) {
       send(player, dt, gyro, accel);
       samples.set(player, { source, at:now });
     }
-    for (const player of last.keys()) if (!samples.has(player)) send(player, 0, ZERO, REST);
     last = samples;
     return samples.size > 0;
   }

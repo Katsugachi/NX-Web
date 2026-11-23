@@ -249,7 +249,7 @@ export function setupInput(getModule) {
       padsSeen = seen;
       listeners.forEach(listener => listener(describe(pads)));
     }
-    polling = pads.length > 0 || trackMotion;
+    polling = pads.length > 0 || (trackMotion && !document.hidden);
     if (!polling) return;
     if (document.hidden) setTimeout(poll, 16);
     else requestAnimationFrame(poll);

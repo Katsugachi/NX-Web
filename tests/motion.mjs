@@ -53,7 +53,8 @@ assert.equal(sent.get(0).dt, 17_000, 'sensor delta uses elapsed microseconds');
 key('Digit1', false);
 tick();
 check(rest);
-assert.equal(frame, null, 'stops polling after a neutral sample');
+tick();
+assert.equal(sent.get(0).dt, 17_000, 'continuous neutral samples let the guest level its orientation');
 
 const migrated = parseBindings('{"a":"Digit1","b":"KeyV"}');
 assert.equal(migrated.a, 'Digit1');
@@ -62,6 +63,7 @@ assert.equal(migrated.pitchUp, null, 'new default does not evict an existing bin
 const bindings = rebind(DEFAULT_BINDINGS, 'pitchUp', 'KeyM');
 window.dispatchEvent(new CustomEvent('nx-bindings', { detail:bindings }));
 key('KeyM');
+tick();
 check([0.5, 0, 0, 0, -0.5, -Math.sqrt(0.75)]);
 event('blur');
 check(rest);
@@ -71,15 +73,18 @@ event('devicemotion', {
   rotationRate:{ beta:180, gamma:-90, alpha:36 },
   accelerationIncludingGravity:xyz(gravity, 0, gravity / 2),
 });
+tick();
 check([0.5, -0.25, 0.1, -1, 0, -0.5]);
 tick(300);
 check(rest);
 event('devicemotion', { rotationRate:{ beta:null, gamma:NaN, alpha:0 } });
-assert.equal(frame, null, 'missing and invalid sensor data are ignored');
+tick();
+check(rest);
 
 event('deviceorientation', { alpha:359, beta:0, gamma:0 });
+tick();
 check(rest);
-now += 20;
+now += 3;
 event('deviceorientation', { alpha:0, beta:0, gamma:0 });
 tick();
 check([0, 0, 1 / 360 / 0.020, 0, 0, -1]);
@@ -124,5 +129,6 @@ check(rest);
 
 engine = { ...engine, _eden_set_motion:undefined };
 key('Digit5'); key('Digit5', false);
+tick();
 assert.equal(frame, null, 'older runtimes without the optional export still work');
 console.log('NX-Web motion: units, orientation wraparound, remapping, source priority, multiplayer, resets and old runtimes OK');
