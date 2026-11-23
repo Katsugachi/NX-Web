@@ -667,7 +667,7 @@ function pollStatus() {
   const gameFps = finite(edenModule._eden_get_game_fps());
   // Running is reported as soon as the core starts; the game is loaded once it draws a frame.
   if (state === 2 && gameFps > 0) loader.finish();
-  watchFrames(state, gameFps, runtimeStats?.frames);
+  watchFrames(state, gameFps, runtimeStats?.frames, runtimeStats?.guestCycles);
   const speed = finite(edenModule._eden_get_emulation_speed()) * 100;
   fpsCounter.textContent = playerFps(state, gameFps);
   systemFps.textContent = isRunning ? playerFps(state, edenModule._eden_get_system_fps()) : '--';
@@ -1291,9 +1291,9 @@ const observeFrames = createFrameWatchdog({
   },
   onFreeze: onCrash,
 });
-function watchFrames(state, gameFps, frames) {
+function watchFrames(state, gameFps, frames, guestCycles) {
   if (crashed || !isRomLoaded) return;
-  observeFrames(state, gameFps, frames);
+  observeFrames(state, gameFps, frames, guestCycles);
 }
 
 async function onCrash(reason) {
