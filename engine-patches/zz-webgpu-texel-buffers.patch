@@ -1,0 +1,611 @@
+--- a/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
++++ b/src/shader_recompiler/backend/wgsl/wgsl_emit_context.cpp
+@@ -350,7 +350,38 @@
+ }
+
+ void EmitContext::DefineTextures(Bindings& bindings) {
+-    // Texture buffers and images are not bound yet; their reads return zero.
++    for (const auto& desc : info.texture_buffer_descriptors) {
++        if (stage == Stage::Compute) break;
++        texture_buffers.emplace_back(bindings.unified, desc.count);
++        for (u32 element = 0; element < desc.count; ++element) {
++            const u32 binding{bindings.unified};
++            header += fmt::format(
++                "@group(0) @binding({0}) var<storage, read> tbo{0}: array<u32>;\n"
++                "@group(0) @binding({1}) var<uniform> tbo_info{0}: vec4<u32>;\n"
++                "fn tbo_fetch{0}(index:u32)->vec4<f32>{{\n"
++                "let texel_info=tbo_info{0};\n"
++                "if(index>=texel_info.y){{return vec4<f32>(0.0);}}\n"
++                "let bits=texel_info.z&255u; let components=(texel_info.z>>8u)&255u;\n"
++                "let kind=texel_info.z>>16u;\n"
++                "var result=vec4<f32>(0.0,0.0,0.0,1.0);\n"
++                "if(kind==1u||kind==2u){{result.w=bitcast<f32>(1u);}}\n"
++                "for(var c=0u;c<4u;c++){{\n"
++                "if(c>=components){{break;}}\n"
++                "let address=texel_info.x+(index*components+c)*(bits/8u);\n"
++                "let word=tbo{0}[address/4u];\n"
++                "let value=extractBits(word,(address%4u)*8u,bits);\n"
++                "let signed_value=bitcast<i32>(value<<(32u-bits))>>(32u-bits);\n"
++                "if(kind==0u){{\n"
++                "if(bits==16u){{result[c]=unpack2x16float(value).x;}}\n"
++                "else{{result[c]=bitcast<f32>(value);}}\n"
++                "}}else if(kind==1u){{result[c]=bitcast<f32>(value);}}\n"
++                "else if(kind==2u){{result[c]=bitcast<f32>(signed_value);}}\n"
++                "else if(kind==3u){{result[c]=f32(value)/f32((1u<<bits)-1u);}}\n"
++                "else{{result[c]=max(f32(signed_value)/f32((1u<<(bits-1u))-1u),-1.0);}}\n"
++                "}}return result;}}\n", binding, binding + 1);
++            bindings.unified += 2;
++        }
++    }
+     u32 num_elements{};
+     for (const auto& desc : info.texture_descriptors) {
+         num_elements += desc.count;
+--- a/src/shader_recompiler/backend/wgsl/wgsl_emit_context.h
++++ b/src/shader_recompiler/backend/wgsl/wgsl_emit_context.h
+@@ -152,6 +152,7 @@
+     std::string_view stage_name = "invalid";
+
+     std::vector<TextureDefinition> textures;
++    std::vector<std::pair<u32, u32>> texture_buffers;
+     /// Texture elements from this ordinal on use the sampler at `shared_sampler_binding`.
+     u32 shared_sampler_first{~0u};
+     u32 shared_sampler_binding{};
+--- a/src/shader_recompiler/backend/wgsl/emit_wgsl_image.cpp
++++ b/src/shader_recompiler/backend/wgsl/emit_wgsl_image.cpp
+@@ -309,10 +309,24 @@
+                     std::string_view ms) {
+     const auto info{inst.Flags<IR::TextureInstInfo>()};
+     if (info.type == TextureType::Buffer) {
+-        if (!offset.IsEmpty() && !offset.IsImmediate()) {
+-            ctx.var_alloc.Consume(offset);
++        const auto address{offset.IsEmpty() ? std::string{coords} :
++                           fmt::format("i32({})+i32({})", coords, ctx.var_alloc.Consume(offset))};
++        if (ctx.stage == Stage::Compute) {
++            ctx.AddF32x4("{}=vec4<f32>(0.0);", inst);
++            ResolveSparse(ctx, inst);
++            return;
+         }
+-        ctx.AddF32x4("{}=vec4<f32>(0.0);", inst);
++        const auto [binding, count]{ctx.texture_buffers.at(info.descriptor_index)};
++        const auto result{ctx.var_alloc.Define(inst, WgslVarType::F32x4)};
++        ctx.Add("{}=vec4<f32>(0.0);", result);
++        const auto resource{count > 1 ? ctx.var_alloc.Consume(index) : std::string{}};
++        for (u32 element = 0; element < count; ++element) {
++            if (count > 1) {
++                ctx.Add("if(u32({})=={}u){{", resource, element);
++            }
++            ctx.Add("{}=tbo_fetch{}(u32({}));", result, binding + element * 2, address);
++            if (count > 1) ctx.Add("}}");
++        }
+         ResolveSparse(ctx, inst);
+         return;
+     }
+@@ -330,7 +344,19 @@
+                               std::string_view lod, const IR::Value& skip_mips_val) {
+     const auto info{inst.Flags<IR::TextureInstInfo>()};
+     if (info.type == TextureType::Buffer) {
+-        ctx.AddU32x4("{}=vec4<u32>(0u);", inst);
++        if (ctx.stage == Stage::Compute) {
++            ctx.AddU32x4("{}=vec4<u32>(0u);", inst);
++            return;
++        }
++        const auto [binding, count]{ctx.texture_buffers.at(info.descriptor_index)};
++        const auto result{ctx.var_alloc.Define(inst, WgslVarType::U32x4)};
++        ctx.Add("{}=vec4<u32>(0u);", result);
++        const auto resource{count > 1 ? ctx.var_alloc.Consume(index) : std::string{}};
++        for (u32 element = 0; element < count; ++element) {
++            if (count > 1) ctx.Add("if(u32({})=={}u){{", resource, element);
++            ctx.Add("{}=vec4<u32>(tbo_info{}.y,0u,0u,0u);", result, binding + element * 2);
++            if (count > 1) ctx.Add("}}");
++        }
+         return;
+     }
+     const auto names{Texture(ctx, info, index)};
+--- a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
+@@ -24,6 +24,7 @@
+ #include "video_core/renderer_webgpu/wgpu_pipeline_cache.h"
+ #include "video_core/renderer_webgpu/wgpu_stats.h"
+ #include "video_core/renderer_webgpu/wgpu_thread.h"
++#include "video_core/renderer_webgpu/wgpu_texel_buffer.h"
+ #include "video_core/renderer_webgpu/wgpu_vertex_layout.h"
+ #include "video_core/shader_environment.h"
+ #include "video_core/surface.h"
+@@ -363,7 +364,7 @@
+         .support_float16 = false,
+         .support_int64 = false,
+         .needs_demote_reorder = false,
+-        .support_snorm_render_buffer = false,
++        .support_snorm_render_buffer = SUPPORT_SNORM_TEXEL_BUFFERS,
+         .support_viewport_index_layer = false,
+         .support_viewport_mask = false,
+         .support_geometry_shader_passthrough = false,
+@@ -547,11 +548,12 @@
+ }
+
+ u32 GraphicsPipeline::CbufLimit(size_t stage) const {
+-    return cache.max_uniform_buffers - 1 -
++    const u32 reserved{1 + Shader::NumDescriptors(stage_infos[stage].texture_buffer_descriptors) +
+            (stage == 0 && (!pulled_buffers.empty() || key.fill_rectangle || IsGeometry() ||
+                            IsTessellation())
+                 ? 1
+-                : 0);
++                : 0)};
++    return cache.max_uniform_buffers > reserved + 1 ? cache.max_uniform_buffers - reserved : 2;
+ }
+
+ bool GraphicsPipeline::SupportsRectangle() {
+@@ -574,6 +576,7 @@
+     const bool packed_cbuf = Shader::Backend::WGSL::PackedCbufFirst(info, CbufLimit(0)) <
+                              info.constant_buffer_descriptors.size();
+     const size_t storage_count = pulled_count + 1 + (packed_cbuf ? 1 : 0) +
++                                 Shader::NumDescriptors(info.texture_buffer_descriptors) +
+                                  Shader::NumDescriptors(info.storage_buffers_descriptors);
+     return pulled_count <= Shader::Backend::WGSL::MAX_PULLED_BUFFERS &&
+            storage_count <= cache.max_storage_buffers;
+@@ -617,8 +620,8 @@
+                 if (!programs[index].info.image_descriptors.empty() ||
+                     !programs[index].info.texture_buffer_descriptors.empty() ||
+                     programs[index].info.storage_buffers_descriptors.size() > 8) {
+-                    LOG_INFO(Render, "TEMP-DEBUG graphics {:016x} stage {}: ssbos {} images {} "
+-                             "texbufs {}", key.Hash(), stage,
++                    LOG_INFO(Render, "WebGPU pipeline {:016x} shader {:016x} stage {}: ssbos {} images {} "
++                                     "texbufs {}", key.Hash(), key.unique_hashes[index], index,
+                              programs[index].info.storage_buffers_descriptors.size(),
+                              programs[index].info.image_descriptors.size(),
+                              programs[index].info.texture_buffer_descriptors.size());
+@@ -863,6 +866,17 @@
+                                                  : wgpu::BufferBindingType::ReadOnlyStorage;
+                     variant.storage_writable.push_back(writable);
+                 }
++            }
++            for (u32 i = 0; i < Shader::NumDescriptors(info.texture_buffer_descriptors); ++i) {
++                auto& buffer = entries.emplace_back();
++                buffer.binding = binding_index++;
++                buffer.visibility = visibility;
++                buffer.buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
++                auto& metadata = entries.emplace_back();
++                metadata.binding = binding_index++;
++                metadata.visibility = visibility;
++                metadata.buffer.type = wgpu::BufferBindingType::Uniform;
++                metadata.buffer.minBindingSize = 16;
+             }
+             u32 ordinal{};
+             const u32 shared_first{Shader::Backend::WGSL::SharedSamplerFirst(
+@@ -904,13 +918,17 @@
+             }
+         }
+         wgpu::BindGroupLayoutDescriptor layout_desc{};
+-        if (IsGeometry() || IsTessellation()) {
++        if (IsGeometry() || IsTessellation() ||
++            std::ranges::any_of(stage_infos, [](const auto& info) {
++                return !info.texture_buffer_descriptors.empty();
++            })) {
+             for (const auto visibility : {wgpu::ShaderStage::Compute, wgpu::ShaderStage::Vertex,
+                                           wgpu::ShaderStage::Fragment}) {
+                 const bool pulled = IsTessellation() ? visibility == wgpu::ShaderStage::Compute
+                                                     : visibility == wgpu::ShaderStage::Vertex;
+-                u32 storage = pulled ? static_cast<u32>(pulled_buffers.size()) + 1 : 0;
+-                u32 uniforms = pulled ? 2 : 1;
++                const bool helpers{IsGeometry() || IsTessellation() || key.fill_rectangle};
++                u32 storage = pulled ? static_cast<u32>(pulled_buffers.size()) + (helpers ? 1 : 0) : 0;
++                u32 uniforms = pulled && (helpers || !pulled_buffers.empty()) ? 2 : 1;
+                 if (IsTessellation()) {
+                     storage += visibility == wgpu::ShaderStage::Compute ? 3
+                                : visibility == wgpu::ShaderStage::Vertex ? 2 : 0;
+@@ -1263,10 +1281,20 @@
+         }
+     }
+     auto* const maxwell3d = cache.maxwell3d;
++    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
++        if (enabled_stages[stage] &&
++            !FitsTexelBufferBindings(stage_infos[stage].texture_buffer_descriptors,
++                                     VideoCommon::NUM_TEXTURE_BUFFERS)) {
++            LOG_ERROR(Render, "WebGPU pipeline {:016x}: too many texel buffer bindings", key.Hash());
++            valid = false;
++            return false;
++        }
++    }
+     auto* const gpu_memory = cache.gpu_memory;
+     const auto& regs{maxwell3d->regs};
+
+     boost::container::small_vector<VideoCommon::ImageViewInOut, 32> views;
++    boost::container::small_vector<VideoCommon::ImageViewInOut, 32> buffer_views;
+     boost::container::small_vector<VideoCommon::SamplerId, 32> samplers;
+
+     texture_cache.SynchronizeDescriptors(false);
+@@ -1286,6 +1314,20 @@
+             ++ssbo_index;
+         }
+         const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
++        for (const auto& desc : info.texture_buffer_descriptors) {
++            for (u32 index = 0; index < desc.count; ++index) {
++                const u32 index_offset{index << desc.size_shift};
++                const GPUVAddr addr{cbufs[desc.cbuf_index].address + desc.cbuf_offset + index_offset};
++                u32 raw{gpu_memory->Read<u32>(addr) << desc.shift_left};
++                if (desc.has_secondary) {
++                    const GPUVAddr second{cbufs[desc.secondary_cbuf_index].address +
++                                          desc.secondary_cbuf_offset + index_offset};
++                    raw |= gpu_memory->Read<u32>(second) << desc.secondary_shift_left;
++                }
++                const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
++                buffer_views.push_back({handle.first});
++            }
++        }
+         for (const auto& desc : info.texture_descriptors) {
+             for (u32 index = 0; index < desc.count; ++index) {
+                 const u32 index_offset{index << desc.size_shift};
+@@ -1304,6 +1346,18 @@
+         }
+     }
+     texture_cache.FillImageViews(std::span(views.data(), views.size()), false, false);
++    texture_cache.FillImageViews(std::span(buffer_views.data(), buffer_views.size()), false, false);
++    size_t buffer_view_index{};
++    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
++        if (!enabled_stages[stage]) continue;
++        buffer_cache.UnbindGraphicsTextureBuffers(stage);
++        const u32 count{Shader::NumDescriptors(stage_infos[stage].texture_buffer_descriptors)};
++        for (u32 index = 0; index < count; ++index) {
++            const ImageView& view{texture_cache.GetImageView(buffer_views[buffer_view_index++].id)};
++            buffer_cache.BindGraphicsTextureBuffer(stage, index, view.GpuAddr(), view.BufferSize(),
++                                                   view.format, false, false);
++        }
++    }
+
+     buffer_cache.UpdateGraphicsBuffers(is_indexed);
+     buffer_cache.BindHostGeometryBuffers(is_indexed);
+@@ -1475,6 +1529,23 @@
+                 }
+                 (writable ? written_buffers : read_buffers).push_back(bound.buffer.Get());
+             }
++        }
++        for (u32 i = 0; i < Shader::NumDescriptors(info.texture_buffer_descriptors); ++i) {
++            if (descriptor_index >= descriptors.size()) return false;
++            const BufferDescriptor& bound = descriptors[descriptor_index++];
++            if (!bound.texel_info || !bound.buffer) return false;
++            auto& buffer = entries.emplace_back();
++            buffer.binding = binding_index++;
++            buffer.buffer = bound.buffer;
++            buffer.offset = bound.offset;
++            buffer.size = std::min<u64>(bound.size, bound.buffer.GetSize() - bound.offset);
++            read_buffers.push_back(bound.buffer.Get());
++            auto& metadata = entries.emplace_back();
++            metadata.binding = binding_index++;
++            metadata.buffer = cache.uniform_ring.Buffer();
++            metadata.offset = cache.uniform_ring.Push(
++                {reinterpret_cast<const u8*>(bound.texel_info->data()), sizeof(*bound.texel_info)});
++            metadata.size = sizeof(*bound.texel_info);
+         }
+         u32 ordinal{};
+         const u32 shared_first{Shader::Backend::WGSL::SharedSamplerFirst(
+--- a/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_buffer_cache.cpp
+@@ -8,6 +8,7 @@
+ #include "common/logging.h"
+ #include "video_core/renderer_webgpu/wgpu_buffer_cache.h"
+ #include "video_core/renderer_webgpu/wgpu_thread.h"
++#include "video_core/renderer_webgpu/wgpu_texel_buffer.h"
+
+ namespace WebGPU {
+
+@@ -468,4 +469,16 @@
+     desc.size = Common::AlignUp(std::max<u64>(size, 4), 4);
+ }
+
++void BufferCacheRuntime::BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
++                                          VideoCore::Surface::PixelFormat format) {
++    BufferDescriptor& desc = descriptors.emplace_back();
++    desc.buffer = buffer.Handle();
++    desc.offset = Common::AlignDown<u64>(offset, 256);
++    desc.size = Common::AlignUp<u64>(std::max<u64>(size + offset - desc.offset, 4), 4);
++    desc.texel_info = GetTexelBufferInfo(static_cast<u32>(offset - desc.offset), size, format);
++    if (!desc.texel_info) {
++        LOG_ERROR(Render, "Unsupported WebGPU texel buffer format {}", static_cast<u32>(format));
++    }
++}
++
+ } // namespace WebGPU
+--- a/src/video_core/renderer_webgpu/wgpu_buffer_cache.h
++++ b/src/video_core/renderer_webgpu/wgpu_buffer_cache.h
+@@ -4,6 +4,7 @@
+ #pragma once
+
+ #include <array>
++#include <optional>
+ #include <span>
+ #include <vector>
+
+@@ -58,6 +59,7 @@
+     u64 offset{};
+     u64 size{};
+     std::vector<u8> data;  ///< Uniform contents, copied into the uniform ring per draw
++    std::optional<std::array<u32, 4>> texel_info;
+ };
+
+ /// Index data the next indexed draw uses, possibly converted to a format WebGPU supports.
+@@ -146,7 +148,8 @@
+
+     void BindUniformBuffer(const Buffer& buffer, u32 offset, u32 size);
+     void BindStorageBuffer(const Buffer& buffer, u32 offset, u32 size, bool is_written);
+-    void BindTextureBuffer(Buffer&, u32, u32, VideoCore::Surface::PixelFormat) {}
++    void BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
++                           VideoCore::Surface::PixelFormat format);
+     void BindImageBuffer(Buffer&, u32, u32, VideoCore::Surface::PixelFormat) {}
+
+     bool PrefersSparseSources() const noexcept {
+--- /dev/null
++++ b/src/video_core/renderer_webgpu/wgpu_texel_buffer.h
+@@ -0,0 +1,130 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <array>
++#include <optional>
++#include <span>
++#include "common/common_types.h"
++#include "shader_recompiler/shader_info.h"
++#include "video_core/surface.h"
++
++namespace WebGPU {
++
++inline constexpr bool SUPPORT_SNORM_TEXEL_BUFFERS = true;
++
++inline bool FitsTexelBufferBindings(std::span<const Shader::TextureBufferDescriptor> descriptors,
++                                    u32 capacity) {
++    u32 count{};
++    for (const auto& desc : descriptors) {
++        if (desc.count > capacity - count) {
++            return false;
++        }
++        count += desc.count;
++    }
++    return true;
++}
++
++struct TexelBufferFormat {
++    u32 bits;
++    u32 components;
++    u32 kind; ///< Float, uint, sint, unorm, snorm (0 through 4).
++
++    constexpr u32 Bytes() const { return bits * components / 8; }
++    constexpr u32 Packed() const { return bits | (components << 8) | (kind << 16); }
++};
++
++inline std::optional<TexelBufferFormat> GetTexelBufferFormat(VideoCore::Surface::PixelFormat format) {
++    using VideoCore::Surface::PixelFormat;
++    switch (format) {
++    case PixelFormat::R32_FLOAT:
++        return TexelBufferFormat{32, 1, 0};
++    case PixelFormat::R32G32_FLOAT:
++        return TexelBufferFormat{32, 2, 0};
++    case PixelFormat::R32G32B32_FLOAT:
++        return TexelBufferFormat{32, 3, 0};
++    case PixelFormat::R32G32B32A32_FLOAT:
++        return TexelBufferFormat{32, 4, 0};
++    case PixelFormat::R16_FLOAT:
++        return TexelBufferFormat{16, 1, 0};
++    case PixelFormat::R16G16_FLOAT:
++        return TexelBufferFormat{16, 2, 0};
++    case PixelFormat::R16G16B16A16_FLOAT:
++        return TexelBufferFormat{16, 4, 0};
++    case PixelFormat::R32_UINT:
++        return TexelBufferFormat{32, 1, 1};
++    case PixelFormat::R32G32_UINT:
++        return TexelBufferFormat{32, 2, 1};
++    case PixelFormat::R32G32B32A32_UINT:
++        return TexelBufferFormat{32, 4, 1};
++    case PixelFormat::R16_UINT:
++        return TexelBufferFormat{16, 1, 1};
++    case PixelFormat::R16G16_UINT:
++        return TexelBufferFormat{16, 2, 1};
++    case PixelFormat::R16G16B16A16_UINT:
++        return TexelBufferFormat{16, 4, 1};
++    case PixelFormat::R8_UINT:
++        return TexelBufferFormat{8, 1, 1};
++    case PixelFormat::R8G8_UINT:
++        return TexelBufferFormat{8, 2, 1};
++    case PixelFormat::A8B8G8R8_UINT:
++        return TexelBufferFormat{8, 4, 1};
++    case PixelFormat::R32_SINT:
++        return TexelBufferFormat{32, 1, 2};
++    case PixelFormat::R32G32_SINT:
++        return TexelBufferFormat{32, 2, 2};
++    case PixelFormat::R32G32B32A32_SINT:
++        return TexelBufferFormat{32, 4, 2};
++    case PixelFormat::R16_SINT:
++        return TexelBufferFormat{16, 1, 2};
++    case PixelFormat::R16G16_SINT:
++        return TexelBufferFormat{16, 2, 2};
++    case PixelFormat::R16G16B16A16_SINT:
++        return TexelBufferFormat{16, 4, 2};
++    case PixelFormat::R8_SINT:
++        return TexelBufferFormat{8, 1, 2};
++    case PixelFormat::R8G8_SINT:
++        return TexelBufferFormat{8, 2, 2};
++    case PixelFormat::A8B8G8R8_SINT:
++        return TexelBufferFormat{8, 4, 2};
++    case PixelFormat::R16_UNORM:
++        return TexelBufferFormat{16, 1, 3};
++    case PixelFormat::R16G16_UNORM:
++        return TexelBufferFormat{16, 2, 3};
++    case PixelFormat::R16G16B16A16_UNORM:
++        return TexelBufferFormat{16, 4, 3};
++    case PixelFormat::R8_UNORM:
++        return TexelBufferFormat{8, 1, 3};
++    case PixelFormat::R8G8_UNORM:
++        return TexelBufferFormat{8, 2, 3};
++    case PixelFormat::A8B8G8R8_UNORM:
++        return TexelBufferFormat{8, 4, 3};
++    case PixelFormat::R16_SNORM:
++        return TexelBufferFormat{16, 1, 4};
++    case PixelFormat::R16G16_SNORM:
++        return TexelBufferFormat{16, 2, 4};
++    case PixelFormat::R16G16B16A16_SNORM:
++        return TexelBufferFormat{16, 4, 4};
++    case PixelFormat::R8_SNORM:
++        return TexelBufferFormat{8, 1, 4};
++    case PixelFormat::R8G8_SNORM:
++        return TexelBufferFormat{8, 2, 4};
++    case PixelFormat::A8B8G8R8_SNORM:
++        return TexelBufferFormat{8, 4, 4};
++    default:
++        return std::nullopt;
++    }
++}
++
++inline std::optional<std::array<u32, 4>> GetTexelBufferInfo(
++    u32 offset, u32 size, VideoCore::Surface::PixelFormat format) {
++    if (size == 0) {
++        return std::array<u32, 4>{};
++    }
++    if (const auto layout = GetTexelBufferFormat(format)) {
++        return std::array<u32, 4>{offset, size / layout->Bytes(), layout->Packed(), 0};
++    }
++    return std::nullopt;
++}
++
++} // namespace WebGPU
+--- a/src/tests/CMakeLists.txt
++++ b/src/tests/CMakeLists.txt
+@@ -30,6 +30,7 @@
+ add_test(NAME tests COMMAND tests)
+
+ add_executable(shader_control_flow_tests video_core/shader_control_flow.cpp)
++target_sources(shader_control_flow_tests PRIVATE video_core/webgpu_texel_buffer.cpp)
+ target_link_libraries(shader_control_flow_tests PRIVATE shader_recompiler Catch2::Catch2WithMain)
+ add_test(NAME shader_control_flow_tests COMMAND shader_control_flow_tests)
+
+--- /dev/null
++++ b/src/tests/video_core/webgpu_texel_buffer.cpp
+@@ -0,0 +1,130 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#include <algorithm>
++#include <iostream>
++#include <limits>
++#include <catch2/catch_test_macros.hpp>
++#include "shader_recompiler/backend/wgsl/wgsl_emit_context.h"
++#include "shader_recompiler/environment.h"
++#include "shader_recompiler/frontend/ir/ir_emitter.h"
++#include "shader_recompiler/host_translate_info.h"
++#include "shader_recompiler/ir_opt/passes.h"
++#include "video_core/renderer_webgpu/wgpu_texel_buffer.h"
++
++namespace {
++class TexelEnvironment final : public Shader::Environment {
++public:
++    Shader::TexturePixelFormat format{Shader::TexturePixelFormat::R8_SNORM};
++    u64 ReadInstruction(u32) override { return 0; }
++    u32 ReadCbufValue(u32, u32) override { return 0; }
++    Shader::TextureType ReadTextureType(u32) override { return Shader::TextureType::Buffer; }
++    Shader::TexturePixelFormat ReadTexturePixelFormat(u32) override { return format; }
++    bool IsTexturePixelFormatInteger(u32) override { return false; }
++    u32 ReadViewportTransformState() override { return 0; }
++    u32 TextureBoundBuffer() const override { return 0; }
++    u32 LocalMemorySize() const override { return 0; }
++    u32 SharedMemorySize() const override { return 0; }
++    std::array<u32, 3> WorkgroupSize() const override { return {1, 1, 1}; }
++    bool HasHLEMacroState() const override { return false; }
++    std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32, u32) override { return {}; }
++    void Dump(u64, u64) override {}
++};
++} // namespace
++
++TEST_CASE("WebGPU SNORM texel fetches are normalized only in WGSL", "[shader][texel-buffer]") {
++    using namespace Shader;
++    REQUIRE(WebGPU::SUPPORT_SNORM_TEXEL_BUFFERS);
++    for (const auto format : {TexturePixelFormat::R8_SNORM, TexturePixelFormat::R16_SNORM}) {
++        for (const bool emulate : {false, true}) {
++            TexelEnvironment env;
++            env.format = format;
++            ObjectPool<IR::Inst> instructions{32};
++            IR::Block block{instructions};
++            IR::IREmitter ir{block};
++            IR::TextureInstInfo flags{};
++            flags.type.Assign(TextureType::Color1D);
++            const auto fetch = ir.ImageFetch(ir.Imm32(0), ir.Imm32(0), {}, ir.Imm32(0), {}, flags);
++            static_cast<void>(ir.CompositeExtract(fetch, 0));
++            IR::Program program;
++            program.post_order_blocks.push_back(&block);
++            HostTranslateInfo host_info{};
++            host_info.support_snorm_render_buffer = !emulate && WebGPU::SUPPORT_SNORM_TEXEL_BUFFERS;
++            host_info.ApplyDescriptorLimitPolicy();
++            Optimization::TexturePass(env, program, host_info);
++            CHECK(program.info.texture_buffer_descriptors.size() == 1);
++            const auto conversions = std::ranges::count(block.Instructions(),
++                IR::Opcode::ConvertF32S32, &IR::Inst::GetOpcode);
++            CHECK(conversions == (emulate ? 4 : 0));
++        }
++    }
++}
++
++TEST_CASE("WebGPU texel arrays fit the fixed cache before binding", "[shader][texel-buffer]") {
++    std::array<Shader::TextureBufferDescriptor, 2> descriptors{};
++    CHECK(WebGPU::FitsTexelBufferBindings({}, 32));
++    descriptors[0].count = 32;
++    CHECK(WebGPU::FitsTexelBufferBindings(descriptors, 32));
++    descriptors[0].count = 33;
++    CHECK_FALSE(WebGPU::FitsTexelBufferBindings(descriptors, 32));
++    descriptors[0].count = 16;
++    descriptors[1].count = 17;
++    CHECK_FALSE(WebGPU::FitsTexelBufferBindings(descriptors, 32));
++    descriptors[0].count = std::numeric_limits<u32>::max();
++    CHECK_FALSE(WebGPU::FitsTexelBufferBindings(descriptors, 32));
++}
++
++TEST_CASE("WebGPU texel buffer format layouts", "[shader][texel-buffer]") {
++    using VideoCore::Surface::PixelFormat;
++    const auto floats = WebGPU::GetTexelBufferFormat(PixelFormat::R32G32B32A32_FLOAT);
++    REQUIRE(floats);
++    CHECK(floats->Bytes() == 16);
++    CHECK(floats->Packed() == (32 | (4 << 8)));
++    const auto snorm = WebGPU::GetTexelBufferFormat(PixelFormat::A8B8G8R8_SNORM);
++    REQUIRE(snorm);
++    CHECK(snorm->Bytes() == 4);
++    CHECK(snorm->kind == 4);
++    CHECK_FALSE(WebGPU::GetTexelBufferFormat(PixelFormat::BC1_RGBA_UNORM));
++}
++
++TEST_CASE("WebGPU null texel slots bind zero-count metadata", "[shader][texel-buffer]") {
++    using VideoCore::Surface::PixelFormat;
++    const auto empty = WebGPU::GetTexelBufferInfo(0, 0, PixelFormat::Invalid);
++    REQUIRE(empty);
++    CHECK(*empty == std::array<u32, 4>{});
++    const auto unsupported = WebGPU::GetTexelBufferInfo(0, 4, PixelFormat::A2R10G10B10_UNORM);
++    CHECK_FALSE(unsupported);
++    const auto supported = WebGPU::GetTexelBufferInfo(12, 32, PixelFormat::R32G32B32A32_FLOAT);
++    REQUIRE(supported);
++    CHECK((*supported)[0] == 12);
++    CHECK((*supported)[1] == 2);
++    CHECK((*supported)[2] == WebGPU::GetTexelBufferFormat(PixelFormat::R32G32B32A32_FLOAT)->Packed());
++}
++
++TEST_CASE("WebGPU texel buffers have distinct storage and metadata bindings", "[shader][texel-buffer]") {
++    using namespace Shader;
++    IR::Program program;
++    program.stage = Stage::VertexB;
++    program.info.texture_buffer_descriptors.push_back({.count = 2});
++    Backend::Bindings bindings;
++    Backend::WGSL::EmitContext ctx{program, bindings, Profile{}, RuntimeInfo{}, {}};
++    REQUIRE(ctx.texture_buffers.size() == 1);
++    CHECK(ctx.texture_buffers[0].first == 0);
++    CHECK(ctx.texture_buffers[0].second == 2);
++    CHECK(bindings.unified == 4);
++    CHECK(ctx.header.find("tbo_fetch0") != std::string::npos);
++    CHECK(ctx.header.find("tbo_fetch2") != std::string::npos);
++    CHECK(ctx.header.find("if(index>=texel_info.y)") != std::string::npos);
++    const auto begin = ctx.header.find("@group(0) @binding(0) var<storage, read> tbo0");
++    const auto end = ctx.header.find("return result;}", ctx.header.find("fn tbo_fetch2", begin));
++    REQUIRE(begin != std::string::npos);
++    REQUIRE(end != std::string::npos);
++    std::cout << "TBO_SHADER_BEGIN\n" << ctx.header.substr(begin, end + 15 - begin)
++              << "\nTBO_SHADER_END\n";
++
++    IR::Program empty;
++    empty.stage = Stage::VertexB;
++    Backend::Bindings empty_bindings;
++    Backend::WGSL::EmitContext empty_ctx{empty, empty_bindings, Profile{}, RuntimeInfo{}, {}};
++    CHECK(empty_ctx.texture_buffers.empty());
++    CHECK(empty_ctx.header.find("tbo_fetch") == std::string::npos);
++}

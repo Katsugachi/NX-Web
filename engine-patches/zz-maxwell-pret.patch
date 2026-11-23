@@ -1,0 +1,252 @@
+--- a/src/shader_recompiler/frontend/maxwell/control_flow.cpp
++++ b/src/shader_recompiler/frontend/maxwell/control_flow.cpp
+@@ -327,11 +327,17 @@
+     case Opcode::EXIT:
+         return AnalyzeEXIT(block, function_id, pc, inst);
+     case Opcode::PRET:
+-        throw NotImplementedException("PRET flow analysis");
+     case Opcode::CAL:
+     case Opcode::JCAL: {
++        const bool is_pret{opcode == Opcode::PRET};
++        if (is_pret && inst.branch.is_cbuf) {
++            throw NotImplementedException("PRET with constant buffer offset");
++        }
+         const bool is_absolute{IsAbsoluteJump(opcode)};
+-        const Location cal_pc{is_absolute ? inst.branch.Absolute() : BranchOffset(pc, inst)};
++        const Location target{is_absolute ? inst.branch.Absolute() : BranchOffset(pc, inst)};
++        // PRET calls the fallthrough block with an explicit RET continuation.
++        const Location cal_pc{is_pret ? pc + 1 : target};
++        const Location return_pc{is_pret ? target : pc + 1};
+         // Technically CAL pushes into PRET, but that's implicit in the function call for us
+         // Insert the function into the list if it doesn't exist
+         const auto it{std::ranges::find(functions, cal_pc, &Function::entrypoint)};
+@@ -343,7 +349,7 @@
+         }
+         block->end_class = EndClass::Call;
+         block->function_call = call_id;
+-        block->return_block = AddLabel(block, block->stack, pc + 1, function_id);
++        block->return_block = AddLabel(block, block->stack, return_pc, function_id);
+         block->end = pc;
+         return AnalysisState::Branch;
+     }
+--- a/src/tests/CMakeLists.txt
++++ b/src/tests/CMakeLists.txt
+@@ -29,6 +29,10 @@
+
+ add_test(NAME tests COMMAND tests)
+
++add_executable(shader_control_flow_tests video_core/shader_control_flow.cpp)
++target_link_libraries(shader_control_flow_tests PRIVATE shader_recompiler Catch2::Catch2WithMain)
++add_test(NAME shader_control_flow_tests COMMAND shader_control_flow_tests)
++
+ # needed for vma
+ if (NOT MSVC)
+     target_compile_options(tests PRIVATE
+--- /dev/null
++++ b/src/tests/video_core/shader_control_flow.cpp
+@@ -0,0 +1,175 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#include <algorithm>
++#include <map>
++#include <stdexcept>
++
++#include <catch2/catch_test_macros.hpp>
++
++#include "shader_recompiler/environment.h"
++#include "shader_recompiler/frontend/ir/program.h"
++#include "shader_recompiler/frontend/maxwell/control_flow.h"
++#include "shader_recompiler/frontend/maxwell/translate_program.h"
++#include "shader_recompiler/host_translate_info.h"
++
++namespace {
++using namespace Shader;
++using namespace Shader::Maxwell;
++
++constexpr u64 PRET = 0xe270000000000000;
++constexpr u64 CAL = 0xe260000000000000;
++constexpr u64 BRA = 0xe240000000000000;
++constexpr u64 RET = 0xe32000000000000f;
++constexpr u64 EXIT = 0xe30000000000000f;
++
++Location PC(int instruction) {
++    return Location{8} + instruction;
++}
++
++class TestEnvironment final : public Environment {
++public:
++    TestEnvironment() {
++        stage = Stage::Compute;
++    }
++
++    void Emit(int instruction, u64 opcode, int target = 0, u64 predicate = 7) {
++        const u32 address = PC(instruction).Offset();
++        const u32 offset = PC(target).Offset() - address - 8;
++        code[address] = opcode | (predicate << 16) |
++                        ((u64{offset} & 0xffffff) << 20);
++    }
++
++    u64 ReadInstruction(u32 address) override { return code.at(address); }
++    u32 ReadCbufValue(u32, u32) override { throw std::logic_error("Unexpected cbuf read"); }
++    TextureType ReadTextureType(u32) override { return TextureType::Color2D; }
++    TexturePixelFormat ReadTexturePixelFormat(u32) override { return {}; }
++    bool IsTexturePixelFormatInteger(u32) override { return false; }
++    u32 ReadViewportTransformState() override { return 0; }
++    u32 TextureBoundBuffer() const override { return 0; }
++    u32 LocalMemorySize() const override { return 0; }
++    u32 SharedMemorySize() const override { return 0; }
++    std::array<u32, 3> WorkgroupSize() const override { return {1, 1, 1}; }
++    bool HasHLEMacroState() const override { return false; }
++    std::optional<ReplaceConstant> GetReplaceConstBuffer(u32, u32) override { return {}; }
++    void Dump(u64, u64) override {}
++
++private:
++    std::map<u32, u64> code;
++};
++
++const Flow::Block& Entry(const Flow::Function& function) {
++    return *std::ranges::find(function.blocks, function.entrypoint, &Flow::Block::begin);
++}
++
++void CheckStructured(TestEnvironment& env, Flow::CFG& cfg) {
++    ObjectPool<IR::Inst> instructions{32};
++    ObjectPool<IR::Block> blocks{32};
++    CHECK_NOTHROW(TranslateProgram(instructions, blocks, env, cfg, HostTranslateInfo{}));
++}
++} // namespace
++
++TEST_CASE("Shader PRET falls through and RET resumes at its explicit target", "[shader][pret]") {
++    TestEnvironment env;
++    env.Emit(0, PRET, 4);
++    env.Emit(1, BRA | 0xf, 6);
++    env.Emit(4, EXIT);
++    env.Emit(6, RET);
++    ObjectPool<Flow::Block> blocks{32};
++    Flow::CFG cfg{env, blocks, PC(0)};
++    REQUIRE(cfg.Functions().size() == 2);
++    const auto& call = Entry(cfg.Functions()[0]);
++    CHECK(call.end_class == Flow::EndClass::Call);
++    CHECK(call.end == PC(0));
++    CHECK(call.return_block->begin == PC(4));
++    CHECK(cfg.Functions()[call.function_call].entrypoint == PC(1));
++    CHECK(Entry(cfg.Functions()[1]).branch_true->end_class == Flow::EndClass::Return);
++    CheckStructured(env, cfg);
++}
++
++TEST_CASE("Shader PRET nests with PRET and CAL", "[shader][pret]") {
++    for (const u64 inner : {PRET, CAL}) {
++        TestEnvironment env;
++        env.Emit(0, PRET, 8);
++        env.Emit(1, inner, inner == PRET ? 5 : 3);
++        env.Emit(2, inner == CAL ? BRA | 0xf : RET, 5);
++        env.Emit(3, RET);
++        env.Emit(5, RET);
++        env.Emit(8, EXIT);
++        ObjectPool<Flow::Block> blocks{32};
++        Flow::CFG cfg{env, blocks, PC(0)};
++        REQUIRE(cfg.Functions().size() == 3);
++        const auto& nested = Entry(cfg.Functions()[1]);
++        CHECK(nested.end_class == Flow::EndClass::Call);
++        CHECK(nested.return_block->begin == PC(inner == PRET ? 5 : 2));
++        CHECK(cfg.Functions()[nested.function_call].entrypoint == PC(inner == PRET ? 2 : 3));
++        CheckStructured(env, cfg);
++    }
++}
++
++TEST_CASE("Shader shared PRET subroutine has distinct continuations", "[shader][pret]") {
++    TestEnvironment env;
++    env.Emit(0, PRET, 3);
++    env.Emit(1, BRA | 0xf, 10);
++    env.Emit(3, PRET, 6);
++    env.Emit(4, BRA | 0xf, 10);
++    env.Emit(6, EXIT);
++    env.Emit(10, RET);
++    ObjectPool<Flow::Block> blocks{32};
++    Flow::CFG cfg{env, blocks, PC(0)};
++    REQUIRE(cfg.Functions().size() == 3);
++    CHECK(Entry(cfg.Functions()[0]).return_block->begin == PC(3));
++    const auto& second = *std::ranges::find(cfg.Functions()[0].blocks, PC(3), &Flow::Block::begin);
++    CHECK(second.return_block->begin == PC(6));
++    CheckStructured(env, cfg);
++}
++
++TEST_CASE("Shader PRET conditional RET preserves fallthrough", "[shader][pret]") {
++    TestEnvironment env;
++    env.Emit(0, PRET, 4);
++    env.Emit(1, RET, 0, 0);
++    env.Emit(2, RET);
++    env.Emit(4, EXIT);
++    ObjectPool<Flow::Block> blocks{32};
++    Flow::CFG cfg{env, blocks, PC(0)};
++    const auto& ret = Entry(cfg.Functions()[1]);
++    CHECK(ret.end_class == Flow::EndClass::Return);
++    CHECK(ret.cond == IR::Condition{IR::Pred::P0});
++    REQUIRE(ret.branch_false != nullptr);
++    CHECK(ret.branch_false->begin == PC(2));
++    CheckStructured(env, cfg);
++}
++
++TEST_CASE("Shader PRET supports backward continuations and EXIT", "[shader][pret]") {
++    for (const bool exits : {false, true}) {
++        TestEnvironment env;
++        env.Emit(0, BRA | 0xf, 3);
++        env.Emit(1, EXIT);
++        env.Emit(3, PRET, 1);
++        env.Emit(4, exits ? EXIT : RET);
++        ObjectPool<Flow::Block> blocks{32};
++        Flow::CFG cfg{env, blocks, PC(0)};
++        REQUIRE(cfg.Functions().size() == 2);
++        const auto& call = *std::ranges::find(cfg.Functions()[0].blocks, PC(3), &Flow::Block::begin);
++        CHECK(call.return_block->begin == PC(1));
++        CHECK(Entry(cfg.Functions()[1]).end_class ==
++              (exits ? Flow::EndClass::Exit : Flow::EndClass::Return));
++        CheckStructured(env, cfg);
++    }
++}
++
++TEST_CASE("Shader empty and invalid PRET programs", "[shader][pret]") {
++    ObjectPool<Flow::Block> blocks{32};
++    TestEnvironment empty;
++    empty.Emit(0, EXIT);
++    Flow::CFG cfg{empty, blocks, PC(0)};
++    CHECK(cfg.Functions().size() == 1);
++    CheckStructured(empty, cfg);
++
++    TestEnvironment cbuf;
++    cbuf.Emit(0, PRET | 0x20, 4);
++    CHECK_THROWS_AS((Flow::CFG{cbuf, blocks, PC(0)}), NotImplementedException);
++
++    TestEnvironment missing;
++    missing.Emit(0, PRET, 4);
++    CHECK_THROWS_AS((Flow::CFG{missing, blocks, PC(0)}), std::out_of_range);
++}
+--- a/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
++++ b/src/video_core/renderer_webgpu/wgpu_pipeline_cache.cpp
+@@ -585,6 +585,8 @@
+     std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> programs;
+     const bool uses_vertex_a{key.unique_hashes[0] != 0};
+     size_t env_index{};
++    u64 shader_hash{};
++    size_t shader_stage{};
+     try {
+         for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+             if (key.unique_hashes[index] == 0) {
+@@ -594,6 +596,8 @@
+             if (!UsesStage(index)) {
+                 continue;
+             }
++            shader_hash = key.unique_hashes[index];
++            shader_stage = index;
+             const u32 cfg_offset{static_cast<u32>(env.StartAddress() + sizeof(Shader::ProgramHeader))};
+             Shader::Maxwell::Flow::CFG cfg(env, pools.flow_block, cfg_offset, index == 0);
+             if (!uses_vertex_a || index != 1) {
+@@ -1212,7 +1216,8 @@
+             });
+         return true;
+     } catch (const std::exception& exception) {
+-        LOG_ERROR(Render, "WebGPU shader translation failed: {}", exception.what());
++        LOG_ERROR(Render, "WebGPU pipeline {:016x} shader {:016x} stage {} translation failed: {}",
++                  key.Hash(), shader_hash, shader_stage, exception.what());
+         return false;
+     }
+ }
