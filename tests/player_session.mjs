@@ -92,15 +92,25 @@ const stash = runInNewContext(`${stashSource}; ({ stashGameFile, resumeAfterCras
 const retrySource = appSource.slice(appSource.indexOf('async function reloadStuckBoot('), appSource.indexOf("window.addEventListener('nx-retry-boot'"));
 for (const failed of [null, 'stash', 'marker']) {
   const retries = [];
+  const originalUrl = 'http://localhost/?core=wasm-jit&bootTimeoutMs=1&tag=one&tag=two#player';
+  const historyState = { library: true };
   const scope = {
+    URL,
     bootStalled: true, bootRetrying: false, stalledBootFile: file, RESUME_KEY: 'eden-resume', romStatus: {},
     stashGameFile: async selected => { assert.equal(selected, file); retries.push('stash'); if (failed === 'stash') throw new Error('quota'); },
     sessionStorage: { setItem(key, value) { assert.equal(key, 'eden-resume'); assert.equal(JSON.parse(value).boot, true); retries.push('marker'); if (failed === 'marker') throw new Error('blocked'); } },
-    location: { reload: () => retries.push('reload') },
+    location: { href: originalUrl, reload: () => retries.push('reload') },
+    history: { state: historyState, replaceState(state, title, url) {
+      assert.equal(state, historyState);
+      assert.equal(title, '');
+      scope.location.href = String(url);
+    } },
   };
   const retry = runInNewContext(`${retrySource}; reloadStuckBoot;`, scope);
   await retry();
   assert.deepEqual(retries, failed === 'stash' ? ['stash'] : failed === 'marker' ? ['stash', 'marker'] : ['stash', 'marker', 'reload']);
+  assert.equal(scope.location.href, failed ? originalUrl : 'http://localhost/?core=wasm-jit&tag=one&tag=two#player',
+    'successful retry removes only the boot timeout override, preserving other parameters and hash');
   if (failed) { assert.match(scope.romStatus.textContent, /Could not prepare the reload/); assert.equal(scope.bootRetrying, false); }
   else { await retry(); assert.equal(retries.length, 3, 'a double click must not schedule two reloads'); }
 }

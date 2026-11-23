@@ -228,15 +228,16 @@ try {
       if (['guest-exit', 'guest-crash'].includes(scenario) && process.env.GUEST_AUTO_RESTART !== '1') {
         await page.$eval('#auto-restart', el => { el.checked = false; });
       }
-      if (scenario === 'boot-stall') await page.goto(`${origin}/?bootTimeoutMs=50`);
+      if (scenario === 'boot-stall') await page.goto(`${origin}/?bootTimeoutMs=50&retryProbe=preserved`);
       await select(page, rom);
       if (scenario === 'boot-stall') {
         await page.waitForSelector('#boot-reload', { visible: true, timeout });
         row.stuckBoot = await ui(page);
         assert.equal(row.stuckBoot.state, 'Stuck');
         assert.match(row.stuckBoot.romStatus, /Boot appears stuck/);
-        await page.evaluate(() => history.replaceState(null, '', location.pathname));
         await Promise.all([page.waitForNavigation(), page.click('#boot-reload')]);
+        assert.equal(new URL(page.url()).searchParams.has('bootTimeoutMs'), false, 'retry removes the test timeout');
+        assert.equal(new URL(page.url()).searchParams.get('retryProbe'), 'preserved', 'retry preserves other query parameters');
         await frames(page);
         row.bootRecovery = await ui(page);
       }

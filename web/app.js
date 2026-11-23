@@ -1370,6 +1370,9 @@ async function reloadStuckBoot() {
   try {
     await stashGameFile(stalledBootFile);
     sessionStorage.setItem(RESUME_KEY, JSON.stringify({ name: stalledBootFile.name, boot: true }));
+    const retryUrl = new URL(location.href);
+    retryUrl.searchParams.delete('bootTimeoutMs');
+    history.replaceState(history.state, '', retryUrl);
     location.reload();
   } catch (err) {
     bootRetrying = false;
