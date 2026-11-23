@@ -60,6 +60,52 @@ assert.equal(crashCalls.length, 0);
 checkCrash('Core.ARM <Critical> ExceptionRaised(exception = 0)');
 checkCrash('RuntimeError: unreachable');
 assert.equal(crashCalls.length, 2, 'genuine CPU faults and Wasm traps still invoke onCrash');
+const cleanupSource = appSource.slice(appSource.indexOf('const resumeCleanup ='), appSource.indexOf('\nconst CRASH_OUTPUT'));
+const resumeDirSource = appSource.slice(appSource.indexOf('async function resumeDir('), appSource.indexOf('\nasync function resumeAfterCrash('));
+for (const mode of ['normal', 'missing', 'resume', 'blocked']) {
+  let finishCleanup;
+  let cleanupDone = false;
+  let cleanups = 0;
+  let directories = 0;
+  let bytes;
+  const root = {
+    removeEntry: async () => {
+      cleanups++;
+      await new Promise(resolve => { finishCleanup = resolve; });
+      cleanupDone = true;
+      if (mode === 'missing') throw new Error('NotFoundError');
+    },
+    getDirectoryHandle: async (name, options) => {
+      assert.equal(name, 'crash-resume');
+      assert.equal(options.create, true);
+      assert.ok(cleanupDone || mode === 'resume', 'cleanup must settle before a stash creates its directory');
+      directories++;
+      return { getFileHandle: async (name, options) => {
+        if (!options?.create) throw new Error('NotFoundError');
+        return { createWritable: async () => new WritableStream({ write: chunk => { bytes = chunk; } }) };
+      } };
+    },
+  };
+  const scope = {
+    sessionReady: Promise.resolve(mode !== 'blocked'), resume: mode === 'resume' ? { name: 'hello.nro' } : null,
+    navigator: { storage: { getDirectory: async () => root } }, RESUME_DIR: 'crash-resume', resumedGameFile: null,
+  };
+  const actions = runInNewContext(`${cleanupSource}\n${resumeDirSource}; ({ stashGameFile, ready: resumeCleanup });`, scope);
+  if (mode === 'blocked') {
+    await actions.ready;
+    assert.equal(cleanups, 0, 'an unowned tab cannot delete another tab\'s recovery file');
+    continue;
+  }
+  const pendingStash = actions.stashGameFile(new File(['latest title'], 'hello.nro'));
+  await new Promise(resolve => setImmediate(resolve));
+  if (mode !== 'resume') {
+    assert.equal(directories, 0, 'an in-flight cleanup blocks stashing');
+    finishCleanup();
+  }
+  await pendingStash;
+  assert.equal(cleanups, mode === 'resume' ? 0 : 1, 'a resume must preserve its recovery file');
+  assert.equal(new TextDecoder().decode(bytes), 'latest title');
+}
 const stashSource = appSource.slice(appSource.indexOf('async function stashGameFile('), appSource.indexOf('\nfunction showSavePoint('));
 let generation = 0;
 let writes = 0;

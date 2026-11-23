@@ -1252,6 +1252,11 @@ const resume = readSession(RESUME_KEY, null);
 try { sessionStorage.removeItem(RESUME_KEY); } catch {}
 const restarts = readSession(RESTARTS_KEY, []).filter(time => Date.now() - time < RESTART_WINDOW_MS);
 
+const resumeCleanup = sessionReady.then(acquired => {
+  if (!acquired || resume) return;
+  return navigator.storage?.getDirectory?.().then(root => root.removeEntry(RESUME_DIR, { recursive: true })).catch(() => {});
+});
+
 const CRASH_OUTPUT = [
   /Eden native termination:/,
   /worker sent an error!/,
@@ -1382,6 +1387,7 @@ async function reloadStuckBoot() {
 window.addEventListener('nx-retry-boot', reloadStuckBoot);
 
 async function resumeDir() {
+  await resumeCleanup;
   const root = await navigator.storage.getDirectory();
   return root.getDirectoryHandle(RESUME_DIR, { create: true });
 }
@@ -1397,11 +1403,7 @@ async function stashGameFile(file, replace = false) {
 }
 
 async function resumeAfterCrash() {
-  if (!resume) {
-    // A normal page load: drop any game copy left from an earlier crash.
-    navigator.storage?.getDirectory?.().then(root => root.removeEntry(RESUME_DIR, { recursive: true })).catch(() => {});
-    return;
-  }
+  if (!resume) return;
   try {
     const file = await (await (await resumeDir()).getFileHandle(resume.name)).getFile();
     resumedGameFile = file;
