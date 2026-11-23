@@ -111,6 +111,15 @@
  #include "video_core/renderer_webgpu/wgpu_vertex_layout.h"
  #include "video_core/shader_environment.h"
  #include "video_core/surface.h"
+@@ -363,7 +364,7 @@
+         .support_float16 = false,
+         .support_int64 = false,
+         .needs_demote_reorder = false,
+-        .support_snorm_render_buffer = false,
++        .support_snorm_render_buffer = SUPPORT_SNORM_TEXEL_BUFFERS,
+         .support_viewport_index_layer = false,
+         .support_viewport_mask = false,
+         .support_geometry_shader_passthrough = false,
 @@ -547,11 +548,12 @@
  }
 
@@ -326,7 +335,7 @@
      bool PrefersSparseSources() const noexcept {
 --- /dev/null
 +++ b/src/video_core/renderer_webgpu/wgpu_texel_buffer.h
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,118 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
 +#pragma once
@@ -338,6 +347,8 @@
 +#include "video_core/surface.h"
 +
 +namespace WebGPU {
++
++inline constexpr bool SUPPORT_SNORM_TEXEL_BUFFERS = true;
 +
 +inline bool FitsTexelBufferBindings(std::span<const Shader::TextureBufferDescriptor> descriptors,
 +                                    u32 capacity) {
@@ -455,14 +466,67 @@
 
 --- /dev/null
 +++ b/src/tests/video_core/webgpu_texel_buffer.cpp
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,116 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
++#include <algorithm>
 +#include <iostream>
 +#include <limits>
 +#include <catch2/catch_test_macros.hpp>
 +#include "shader_recompiler/backend/wgsl/wgsl_emit_context.h"
++#include "shader_recompiler/environment.h"
++#include "shader_recompiler/frontend/ir/ir_emitter.h"
++#include "shader_recompiler/host_translate_info.h"
++#include "shader_recompiler/ir_opt/passes.h"
 +#include "video_core/renderer_webgpu/wgpu_texel_buffer.h"
++
++namespace {
++class TexelEnvironment final : public Shader::Environment {
++public:
++    Shader::TexturePixelFormat format{Shader::TexturePixelFormat::R8_SNORM};
++    u64 ReadInstruction(u32) override { return 0; }
++    u32 ReadCbufValue(u32, u32) override { return 0; }
++    Shader::TextureType ReadTextureType(u32) override { return Shader::TextureType::Buffer; }
++    Shader::TexturePixelFormat ReadTexturePixelFormat(u32) override { return format; }
++    bool IsTexturePixelFormatInteger(u32) override { return false; }
++    u32 ReadViewportTransformState() override { return 0; }
++    u32 TextureBoundBuffer() const override { return 0; }
++    u32 LocalMemorySize() const override { return 0; }
++    u32 SharedMemorySize() const override { return 0; }
++    std::array<u32, 3> WorkgroupSize() const override { return {1, 1, 1}; }
++    bool HasHLEMacroState() const override { return false; }
++    std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32, u32) override { return {}; }
++    void Dump(u64, u64) override {}
++};
++} // namespace
++
++TEST_CASE("WebGPU SNORM texel fetches are normalized only in WGSL", "[shader][texel-buffer]") {
++    using namespace Shader;
++    REQUIRE(WebGPU::SUPPORT_SNORM_TEXEL_BUFFERS);
++    for (const auto format : {TexturePixelFormat::R8_SNORM, TexturePixelFormat::R16_SNORM}) {
++        for (const bool emulate : {false, true}) {
++            TexelEnvironment env;
++            env.format = format;
++            ObjectPool<IR::Inst> instructions{32};
++            IR::Block block{instructions};
++            IR::IREmitter ir{block};
++            IR::TextureInstInfo flags{};
++            flags.type.Assign(TextureType::Color1D);
++            const auto fetch = ir.ImageFetch(ir.Imm32(0), ir.Imm32(0), {}, ir.Imm32(0), {}, flags);
++            static_cast<void>(ir.CompositeExtract(fetch, 0));
++            IR::Program program;
++            program.post_order_blocks.push_back(&block);
++            HostTranslateInfo host_info{};
++            host_info.support_snorm_render_buffer = !emulate && WebGPU::SUPPORT_SNORM_TEXEL_BUFFERS;
++            host_info.ApplyDescriptorLimitPolicy();
++            Optimization::TexturePass(env, program, host_info);
++            CHECK(program.info.texture_buffer_descriptors.size() == 1);
++            const auto conversions = std::ranges::count(block.Instructions(),
++                IR::Opcode::ConvertF32S32, &IR::Inst::GetOpcode);
++            CHECK(conversions == (emulate ? 4 : 0));
++        }
++    }
++}
 +
 +TEST_CASE("WebGPU texel arrays fit the fixed cache before binding", "[shader][texel-buffer]") {
 +    std::array<Shader::TextureBufferDescriptor, 2> descriptors{};
