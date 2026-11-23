@@ -1097,6 +1097,17 @@ window.addEventListener('keydown', (e) => {
 
 // Controller input goes to the engine once a game is running.
 const gamepads = setupInput(() => (isRomLoaded && !crashed ? edenModule : null));
+if (gamepads.needsMotionPermission) {
+  document.getElementById('motion-permission-card').hidden = false;
+  const button = document.getElementById('btn-motion-permission');
+  const status = document.getElementById('motion-permission-status');
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    const granted = await gamepads.requestMotionPermission();
+    status.textContent = granted ? 'Device motion enabled.' : 'Device motion not allowed.';
+    button.disabled = granted;
+  });
+}
 {
   const list = document.getElementById('gamepad-list');
   const layout = document.getElementById('gamepad-layout');

@@ -52,7 +52,7 @@ const drawer = $('settings-drawer');
 const shortcuts = $('shortcuts-dialog');
 const leave = $('leave-dialog');
 const sections = [
-  ['controls', 'Controls', ['gamepads']],
+  ['controls', 'Controls', ['motion', 'gamepads']],
   ['system', 'System files', ['system-files']],
   ['graphics', 'Graphics & core', ['emulation', 'renderer', 'speed', 'audio']],
   ['saves', 'Saves', ['save-states']],
@@ -158,6 +158,7 @@ function renderShortcuts() {
       ['A / B / X / Y', ['a','b','x','y']],
       ['L / R', ['l','r']], ['ZL / ZR', ['zl','zr']],
       ['Plus / Minus', ['plus','minus']], ['L3 / R3', ['l3','r3']], ['Home', ['home']],
+      ['Motion pitch / yaw / roll', ['pitchUp','pitchDown','yawLeft','yawRight','rollLeft','rollRight']],
     ];
     const shortcuts = rows.map(([name, ids]) => [name, ids.map(id => keyLabel(bindings[id]))]);
     if (hotkey) shortcuts.push(

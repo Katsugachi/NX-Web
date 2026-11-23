@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 
 const tests = ['engine_patches.mjs', 'zip_reader.mjs', 'homebrew_bundle.mjs', 'nro_argv.mjs', 'browser_dns.mjs', 'saves.mjs', 'session_lock.mjs', 'time_limit.mjs', 'rom_file.mjs',
   'frame_watchdog.mjs', 'results.mjs', 'compat.mjs', 'compare_results.mjs',
-  'diagnostics.mjs', 'agent_protocol.mjs', 'shell.mjs', 'input.mjs', 'server.mjs', 'player_session.mjs'];
+  'diagnostics.mjs', 'agent_protocol.mjs', 'shell.mjs', 'input.mjs', 'motion.mjs', 'server.mjs', 'player_session.mjs'];
 for (const test of ['web_artifact_smoke.cjs', 'archive_reader.mjs']) {
   const artifact = test.endsWith('.cjs') ? 'eden.wasm' : 'eden_archive.js';
   if (existsSync(new URL(`../web/runtime/${artifact}`, import.meta.url))) tests.push(test);

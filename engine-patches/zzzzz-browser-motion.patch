@@ -1,0 +1,93 @@
+--- a/src/yuzu_cmd/emscripten_main.cpp
++++ b/src/yuzu_cmd/emscripten_main.cpp
+@@ -21,6 +21,7 @@
+ #include <cmath>
+ #include <memory>
+ #include <mutex>
++#include <optional>
+ #include <string>
+ #include <string_view>
+ #include <vector>
+@@ -110,12 +111,21 @@
+     float y = 0.0f;
+ };
+
++struct MotionSample {
++    int delta_us;
++    std::array<float, 3> gyro;
++    std::array<float, 3> accel;
++};
++
+ /// The virtual gamepad the page drives, for reading rumble from any thread.
+ std::atomic<InputCommon::VirtualGamepad*> g_virtual_gamepad{nullptr};
+
+ std::mutex g_request_mutex;
+ std::condition_variable g_request_cv;
+ std::deque<Request> g_requests;
++// Only the latest sample per player is useful if the emulator thread falls behind.
++std::array<std::optional<MotionSample>, 8> g_pending_motion;
++bool g_motion_pending = false;
+
+ std::atomic<int> g_state{int(EmuState::Idle)};
+ std::atomic<int> g_load_result{0};
+@@ -536,6 +546,23 @@
+                  .y = std::clamp(y / 720.0f, 0.0f, 1.0f)});
+ }
+
++/// Controller-local gyro in turns/s and acceleration in g, with -Z at rest.
++EMSCRIPTEN_KEEPALIVE void eden_set_motion(int player, int delta_us, float gx, float gy, float gz,
++                                          float ax, float ay, float az) {
++    if (player < 0 || player >= static_cast<int>(g_pending_motion.size()) || delta_us < 0 ||
++        delta_us > 100000 ||
++        !std::ranges::all_of(std::array{gx, gy, gz, ax, ay, az},
++                            [](float value) { return std::isfinite(value) && std::abs(value) <= 16.0f; })) {
++        return;
++    }
++    {
++        std::scoped_lock lock{g_request_mutex};
++        g_pending_motion[player] = MotionSample{delta_us, {gx, gy, gz}, {ax, ay, az}};
++        g_motion_pending = true;
++    }
++    g_request_cv.notify_one();
++}
++
+ /// Connects (1) or disconnects (0) a Pro Controller for player 2 to 8 (index 1 to 7).
+ EMSCRIPTEN_KEEPALIVE void eden_set_player_connected(int player, int connected) {
+     PushRequest({.kind = Request::Kind::Connect, .player = player, .pressed = connected != 0});
+@@ -934,14 +961,18 @@
+
+     for (;;) {
+         std::optional<Request> request;
++        decltype(g_pending_motion) motion{};
+         {
+             std::unique_lock lock{g_request_mutex};
+             // Frame-timed headless runs poll often enough to act on individual game frames.
+             g_request_cv.wait_for(lock, frame_timed ? std::chrono::milliseconds(2) : std::chrono::milliseconds(1000),
+-                                  [] { return !g_requests.empty() || g_camera_pending; });
++                                  [] { return !g_requests.empty() || g_camera_pending || g_motion_pending; });
+             if (!g_requests.empty()) {
+                 request = std::move(g_requests.front());
+                 g_requests.pop_front();
++            } else if (g_motion_pending) {
++                motion.swap(g_pending_motion);
++                g_motion_pending = false;
+             }
+         }
+
+@@ -988,6 +1019,16 @@
+             }
+         }
+
++        if (g_state == int(EmuState::Running) || g_state == int(EmuState::Paused)) {
++            for (size_t player = 0; player < motion.size(); ++player) {
++                if (motion[player]) {
++                    const auto& [delta_us, gyro, accel] = *motion[player];
++                    emulator->input_subsystem.GetVirtualGamepad()->SetMotionState(
++                        player, static_cast<u64>(delta_us), gyro[0], gyro[1], gyro[2], accel[0],
++                        accel[1], accel[2]);
++                }
++            }
++        }
+         emulator->UpdateCamera();
+         emulator->UpdatePerfStats();
+         emulator->CollectFrameTimes();

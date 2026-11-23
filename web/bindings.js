@@ -25,6 +25,12 @@ export const ACTIONS = [
   { id:'l3', label:'Left stick click', key:'KeyC', button:'LStick' },
   { id:'r3', label:'Right stick click', key:'KeyN', button:'RStick' },
   { id:'home', label:'Home', key:'Backquote', button:'Home' },
+  { id:'pitchUp', label:'Motion pitch up', key:'Digit1', motion:[0,1] },
+  { id:'pitchDown', label:'Motion pitch down', key:'Digit2', motion:[0,-1] },
+  { id:'yawLeft', label:'Motion yaw left', key:'Digit3', motion:[2,1] },
+  { id:'yawRight', label:'Motion yaw right', key:'Digit4', motion:[2,-1] },
+  { id:'rollLeft', label:'Motion roll left', key:'Digit5', motion:[1,1] },
+  { id:'rollRight', label:'Motion roll right', key:'Digit6', motion:[1,-1] },
   { id:'open', label:'Open game · library only', key:'KeyO', hotkey:true },
   { id:'pause', label:'Pause / resume', key:'KeyP', hotkey:true },
   { id:'save', label:'Save slot', key:'F5', hotkey:true },
@@ -47,10 +53,12 @@ export function usesNativeKeys(event) {
     || (event.key === ' ' && event.target?.tagName === 'BUTTON');
 }
 export function keyLabel(key) {
+  if (!key) return 'Unbound';
   return key.replace(/Key|Digit/g, '').replace('Shift+Slash', '?').replace('Backquote', '`')
     .replace('ArrowUp', '↑').replace('ArrowDown', '↓').replace('ArrowLeft', '←').replace('ArrowRight', '→');
 }
 export function bindingConflict(bindings, id, key) {
+  if (!key) return;
   const target = ACTIONS.find(action => action.id === id);
   return ACTIONS.find(action => action.id !== id && bindings[action.id] === key
     && !(id === 'open' && !action.hotkey) && !(action.id === 'open' && !target?.hotkey));
@@ -59,6 +67,10 @@ export function parseBindings(raw) {
   try {
     const saved = JSON.parse(raw ?? '{}');
     const result = Object.fromEntries(ACTIONS.map(action => [action.id, validKey(saved[action.id]) ? saved[action.id] : action.key]));
+    // New motion defaults must not override existing custom shortcuts.
+    for (const action of ACTIONS.filter(action => action.motion && !validKey(saved[action.id]))) {
+      if (bindingConflict(result, action.id, result[action.id])) result[action.id] = null;
+    }
     if (ACTIONS.some(action => bindingConflict(result, action.id, result[action.id]))) return { ...DEFAULT_BINDINGS };
     return result;
   } catch { return { ...DEFAULT_BINDINGS }; }

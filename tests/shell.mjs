@@ -39,7 +39,8 @@ globalThis.localStorage = { getItem:()=>{throw new Error('blocked');}, setItem:(
 assert.deepEqual(readBindings(),DEFAULT_BINDINGS);
 globalThis.window = new EventTarget();
 assert.equal(writeBindings(DEFAULT_BINDINGS),false);
-assert.equal(ACTIONS.filter(action=>!action.hotkey).length,25);
+assert.equal(ACTIONS.filter(action=>!action.hotkey && !action.motion).length,25);
+assert.equal(ACTIONS.filter(action=>action.motion).length,6);
 const source = await readFile(new URL('../web/shell.js', import.meta.url), 'utf8');
 const handler = source.slice(source.indexOf("window.addEventListener('keydown', event => {"));
 const root = { inert:true };

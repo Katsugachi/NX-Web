@@ -88,6 +88,7 @@ automatically (press a controller button to expose it to the browser).
 | L / R / ZL / ZR | Q / O / E / U |
 | Plus / Minus | Enter / Backspace |
 | L3 / R3 / Home | C / N / Backquote |
+| Motion pitch / yaw / roll | 1 / 2 · 3 / 4 · 5 / 6 |
 
 | Emulator | Default key |
 | --- | --- |
@@ -103,6 +104,14 @@ Tab keeps its normal focus-navigation behavior inside dialogs. Escape also retai
 the browser's native close-dialog behavior. Keyboard game input is released on
 blur, rebinding, opening a dialog or focusing a form field so buttons cannot
 remain stuck. Home is a system button, not an in-game controller input.
+
+Motion controls feed the emulated Pro Controller. A phone or tablet can supply
+motion and orientation on a secure origin; select **Enable device motion** under
+**Settings → Controls** if your browser asks for permission. Gamepad motion works
+only if the browser exposes a motion pose (standard desktop Chrome gamepads
+don't). Hold a motion key to override player 1 sensors and simulate rotation;
+pitch and roll also tilt the accelerometer. Release to return control to the
+physical sensor or to rest.
 
 Settings contains controls/gamepads, system-file import, graphics filtering and
 fit, JIT/interpreter selection, speed limit, audio, saves and diagnostics. Changing
