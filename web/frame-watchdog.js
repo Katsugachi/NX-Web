@@ -1,5 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+export function bootTimeoutMs(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 90_000;
+}
+
+export function createBootWatchdog({ timeoutMs, now = () => performance.now(), onStall }) {
+  let file = null;
+  let lastProgress = 0;
+  return {
+    start(selected) { file = selected; lastProgress = now(); },
+    progress() { if (file) lastProgress = now(); },
+    stop() { file = null; },
+    tick() {
+      if (!file || now() - lastProgress < timeoutMs) return;
+      const selected = file;
+      file = null;
+      onStall(selected);
+    },
+  };
+}
+
 export function createFrameWatchdog({ timeoutMs, now = () => performance.now(), onFirstFrame = () => {}, onFreeze }) {
   let previousFrames = null;
   let lastFrameAt = null;

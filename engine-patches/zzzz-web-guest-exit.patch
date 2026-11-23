@@ -1,0 +1,48 @@
+--- a/src/core/hle/kernel/svc/svc_process.cpp
++++ b/src/core/hle/kernel/svc/svc_process.cpp
+@@ -19,6 +19,9 @@
+                "Process has already exited");
+
+     system.Exit();
++#ifdef __EMSCRIPTEN__
++    current_process->Exit(system.Kernel());
++#endif
+ }
+
+ /// Gets the ID of the specified process or a specified thread's owning process.
+--- a/src/yuzu_cmd/emscripten_main.cpp
++++ b/src/yuzu_cmd/emscripten_main.cpp
+@@ -95,10 +95,11 @@
+     Paused = 3,
+     Failed = 4,
+     Stopped = 5,
++    Exited = 6,
+ };
+
+ struct Request {
+-    enum class Kind { Boot, Pause, Resume, Shutdown, Button, Stick, Connect, Touch } kind;
++    enum class Kind { Boot, Pause, Resume, Shutdown, GuestExit, Button, Stick, Connect, Touch } kind;
+     std::string path;
+     /// Input: player index, VirtualGamepad button or stick id, and its state (pressed is also
+     /// whether a Connect request connects or disconnects the player).
+@@ -233,7 +234,7 @@
+         CacheGameInfo(path);
+         system.GPU().Start();
+         system.GetCpuManager().OnGpuReady();
+-        system.RegisterExitCallback([] { PushRequest({Request::Kind::Shutdown, {}}); });
++        system.RegisterExitCallback([] { PushRequest({Request::Kind::GuestExit, {}}); });
+
+         system.Run();
+         g_state = int(EmuState::Running);
+@@ -961,6 +962,11 @@
+                 emulator->input_subsystem.GetTouchScreen()->ReleaseAllTouch();
+                 emulator->Shutdown();
+                 break;
++            case Request::Kind::GuestExit:
++                emulator->input_subsystem.GetTouchScreen()->ReleaseAllTouch();
++                emulator->Shutdown();
++                g_state = int(EmuState::Exited);
++                break;
+             case Request::Kind::Button:
+                 emulator->SetButton(request->player, request->id, request->pressed);
+                 break;

@@ -14,7 +14,7 @@ import { mountBrowserRom } from './browser-rom.js';
 import { bundledSdFiles, homebrewRomPath, mountBundledSdFiles } from './homebrew-bundle.js';
 import { setupAudio } from './audio.js';
 import { setupCamera } from './camera.js';
-import { createFrameWatchdog } from './frame-watchdog.js';
+import { createFrameWatchdog, createBootWatchdog, bootTimeoutMs } from './frame-watchdog.js';
 import { playerFps, rebootGame, createPipCapture } from './player-session.js';
 import { isArchive, openArchive, storedRomSlice } from './archive.js';
 import { BUILD_CORES, activeCore, coreBackend, coreEnvironment, findCore, runtimeBase, storeCore } from './cores.js';
@@ -38,9 +38,18 @@ import {
 } from './recovery.js';
 import { setupCompatibility } from './compat.js';
 import { setupDiagnostics } from './diagnostics.js';
-import { acquireSession } from './session-lock.js';
+import { acquireSession, createSessionLaunch } from './session-lock.js';
 
 let sessionOwned = false;
+const sessionLaunch = createSessionLaunch({
+  launch: launchFile,
+  onPending: file => {
+    sessionNotice.hidden = false;
+    sessionNotice.dataset.pending = file.name;
+    sessionNotice.textContent = `${sessionNotice.textContent.split('\n')[0]}\nWaiting to launch ${file.name} automatically when this tab acquires the session.`;
+    setRomStatus(`${file.name} is waiting for this tab to acquire the session. Close the other NX-Web tab to launch automatically.`);
+  },
+});
 const sessionNotice = document.createElement('section');
 sessionNotice.id = 'session-lock';
 sessionNotice.setAttribute('role', 'status');
@@ -55,6 +64,12 @@ const sessionReady = acquireSession(status => {
     : status === 'error'
       ? 'NX-Web could not secure this session. Reload the page to try again before playing.'
       : 'Checking whether NX-Web is open in another tab…';
+  if (!sessionOwned && sessionNotice.dataset.pending) {
+    sessionNotice.textContent += `\nWaiting to launch ${sessionNotice.dataset.pending} automatically when this tab acquires the session.`;
+  }
+  queueMicrotask(() => {
+    Promise.resolve(sessionLaunch.setOwned(sessionOwned)).catch(err => setRomStatus(`Could not launch the pending game: ${err.message}`));
+  });
 });
 document.addEventListener('keydown', event => {
   if (!sessionOwned) {
@@ -110,6 +125,14 @@ let loadingRom = false;
 let resetting = false;
 let crashed = false;
 let browserRom = null;
+let bootStalled = false;
+let stalledBootFile = null;
+let bootRetrying = false;
+const bootWatchdog = createBootWatchdog({
+  timeoutMs: bootTimeoutMs(new URLSearchParams(location.search).get('bootTimeoutMs')),
+  onStall: showStuckBoot,
+});
+setInterval(() => bootWatchdog.tick(), 250);
 
 // Log widget: engine output and frontend events, newest at the bottom.
 const LOG_LIMIT = 500;
@@ -117,6 +140,7 @@ const ANSI_ESCAPE = /\x1b\[[0-9;]*m/g;
 const recentLog = [];
 function log(text, kind = '') {
   text = String(text).replace(ANSI_ESCAPE, '');
+  if (!kind && text.trim()) bootWatchdog.progress();
   // Frontend messages pass a kind; mirror them to the console, where engine output already goes.
   if (kind === 'ui' || kind === 'err') console.info('[UI]', text);
   recentLog.push(`${new Date().toISOString()} ${text}`);
@@ -261,6 +285,7 @@ const loader = {
 };
 
 function setRomStatus(text) {
+  if (bootStalled) return;
   romStatus.textContent = text;
   log(text, 'ui');
 }
@@ -460,6 +485,7 @@ async function initWasmCoreOnce() {
   checkIsolation();
   await loadRuntimeScript();
   await inspectWasmBinary();
+  if (bootStalled) return;
 
   if (typeof createEdenModule !== 'function') {
     wasmBadge.className = 'status-badge';
@@ -499,6 +525,7 @@ async function initWasmCoreOnce() {
       printErr: (text) => { console.error('[Eden]', text); log(text); checkCrashOutput(text); },
       onAbort: (what) => onCrash(`runtime aborted: ${what}`),
     });
+    if (bootStalled) return;
     isInitialized = true;
     applySpeedLimit();
     showCoreInfo();
@@ -511,6 +538,7 @@ async function initWasmCoreOnce() {
     log('Eden WebAssembly core ready.', 'ui');
     diagnostics.stage('ready');
   } catch (err) {
+    if (bootStalled) return;
     console.error('Failed to initialize Eden WebAssembly module:', err);
     wasmBadge.className = 'status-badge';
     wasmStatusText.textContent = 'WASM Init Failed';
@@ -541,7 +569,7 @@ function reloadForMemory() {
   return true;
 }
 
-const EmuState = ['Idle', 'Booting', 'Running', 'Paused', 'Failed', 'Stopped'];
+const EmuState = ['Idle', 'Booting', 'Running', 'Paused', 'Failed', 'Stopped', 'Exited'];
 let statusTimer = null;
 let lastState = -1;
 
@@ -596,8 +624,9 @@ function showRuntimeInfo(state) {
 }
 
 function pollStatus() {
-  if (!edenModule || crashed || memoryUnavailable) return;
+  if (!edenModule || crashed || memoryUnavailable || bootStalled) return;
   const state = edenModule._eden_get_state();
+  if (state === 2) bootWatchdog.stop();
   const runtimeStats = showRuntimeInfo(state);
   const name = EmuState[state] || `State ${state}`;
   wasmState.textContent = name;
@@ -615,16 +644,22 @@ function pollStatus() {
     lastState = state;
     if (state === 1) peakFps = 0;
     log(`Emulation state: ${name}`, state === 4 ? 'err' : 'ui');
+    if (state === 6) {
+      void onGuestExit();
+    }
     if ((state === 2 || state === 4) && edenModule._eden_is_switch2_title?.() === 1) {
       log('This is a Nintendo Switch 2 game. Switch 2 games are not supported yet, so it may not boot or run correctly.', 'err');
     }
   }
   if (state === 4) {
+    bootWatchdog.stop();
     loader.fail();
     wasmStatusText.textContent = edenModule._eden_is_switch2_title?.() === 1
       ? 'Boot failed: Nintendo Switch 2 games are not supported yet'
       : `Boot failed (load result ${edenModule._eden_get_load_result()})`;
     romStatus.textContent = gpuFailure ? `GPU initialization failed: ${gpuFailure}. This runtime has no WebGL fallback; see the engine log for adapter/device errors.` : wasmStatusText.textContent;
+  } else if (state === 6) {
+    wasmStatusText.textContent = `Exited: ${currentRomName}`;
   } else if (state >= 1 && state <= 3) {
     wasmStatusText.textContent = `${name}: ${currentRomName}`;
   }
@@ -645,6 +680,19 @@ function pollStatus() {
   if (isRunning) peakFps = Math.max(peakFps, gameFps);
   speedFps.textContent = isRunning ? `${gameFps.toFixed(1)} FPS` : '--';
   speedPeak.textContent = peakFps > 0 ? `${peakFps.toFixed(1)} FPS` : '--';
+}
+
+async function onGuestExit() {
+  bootWatchdog.stop();
+  loader.finish();
+  setRomStatus('Game exited normally. Use Back to library to choose another title.');
+  const stop = stopSaveWatch;
+  stopSaveWatch = null;
+  try {
+    await stop?.({ flush: true });
+  } catch (err) {
+    log(`Could not preserve saves after exit: ${err.message}`, 'err');
+  }
 }
 
 function startLoop() {
@@ -735,7 +783,10 @@ async function hasNroHeader(file) {
 
 // Handle dropped or selected ROM file, or an archive holding one
 async function handleFile(file) {
-  if (!sessionOwned) return;
+  return sessionLaunch.select(file);
+}
+
+async function launchFile(file) {
   if (!file) return;
   if (loadingRom || isRomLoaded) {
     log('ROM selection ignored: a game is already loading or loaded.', 'ui');
@@ -748,6 +799,7 @@ async function handleFile(file) {
     await loadFile(file);
   } finally {
     loadingRom = false;
+    if (!isRomLoaded) bootWatchdog.stop();
     fileInput.disabled = isRomLoaded;
     browseBtn.disabled = isRomLoaded;
   }
@@ -798,16 +850,20 @@ async function loadFile(file) {
     setRomStatus(`${rom.name} isn't a valid homebrew .nro file; it may be damaged or incomplete. Choose another file.`);
     return;
   }
+  bootWatchdog.start(file);
   setRomStatus(`Starting ${rom.name}...`);
 
   try {
-    if (!await inspectGpu()) {
+    const gpuReady = await inspectGpu();
+    if (bootStalled) return;
+    if (!gpuReady) {
       setRomStatus(`Can't start ${rom.name}: this browser has no working WebGPU, which NX-Web needs to draw games. See Settings → Diagnostics for details.`);
       diagnostics.fail('environment', 'WebGPU is unavailable');
       return;
     }
 
     await initWasmCore();
+    if (bootStalled) return;
     if (!isInitialized) {
       setRomStatus(`Can't start ${rom.name}: the emulator engine didn't start. See Settings → Diagnostics for details.`);
       return;
@@ -848,10 +904,10 @@ async function loadFile(file) {
       diagnostics.stage('copy');
       let copied;
       if (!isNro && edenModule._eden_register_browser_rom && (rom.file || navigator.storage?.getDirectory)) {
-        browserRom = await mountBrowserRom(edenModule, path, rom, bytes => { loader.bytes = bytes; });
+        browserRom = await mountBrowserRom(edenModule, path, rom, bytes => { loader.bytes = bytes; bootWatchdog.progress(); });
         copied = browserRom.bytes;
       } else {
-        copied = await mountRom(edenModule.FS, path, rom, bytes => { loader.bytes = bytes; });
+        copied = await mountRom(edenModule.FS, path, rom, bytes => { loader.bytes = bytes; bootWatchdog.progress(); });
       }
       trackBundledSdFiles(edenModule.FS, [
         ...(bundle?.installed ?? []),
@@ -861,6 +917,7 @@ async function loadFile(file) {
       loader.setPhase('boot');
       diagnostics.stage('boot');
 
+      if (bootStalled) return;
       if (edenModule.ccall('eden_boot', 'number', ['string'], [path]) !== 0) {
         throw new Error('eden_boot rejected the request');
       }
@@ -875,6 +932,8 @@ async function loadFile(file) {
       setRomStatus(`Booting ${rom.name}. Reload the page to load a different game.`);
       statusTimer ??= setInterval(pollStatus, 500);
     } catch (err) {
+      if (bootStalled) return;
+      bootWatchdog.stop();
       browserRom?.close();
       browserRom = null;
       if (bundle) {
@@ -1193,6 +1252,11 @@ const resume = readSession(RESUME_KEY, null);
 try { sessionStorage.removeItem(RESUME_KEY); } catch {}
 const restarts = readSession(RESTARTS_KEY, []).filter(time => Date.now() - time < RESTART_WINDOW_MS);
 
+const resumeCleanup = sessionReady.then(acquired => {
+  if (!acquired || resume) return;
+  return navigator.storage?.getDirectory?.().then(root => root.removeEntry(RESUME_DIR, { recursive: true })).catch(() => {});
+});
+
 const CRASH_OUTPUT = [
   /Eden native termination:/,
   /worker sent an error!/,
@@ -1224,6 +1288,8 @@ function watchFrames(state, gameFps, frames) {
 async function onCrash(reason) {
   // A reload for memory is already on its way; the errors that follow are not a game crash.
   if (crashed || !lastGameFile || memoryUnavailable) return;
+  bootWatchdog.stop();
+  bootStalled = false;
   crashed = true;
   isRunning = false;
   isPaused = false;
@@ -1290,7 +1356,38 @@ async function onCrash(reason) {
   setTimeout(() => location.reload(), 1000);
 }
 
+function showStuckBoot(file) {
+  if (crashed) return;
+  stalledBootFile = file;
+  setRomStatus('Boot appears stuck: no engine log or first frame progress. Reload and retry this title; browser storage will not be cleared.');
+  bootStalled = true;
+  isRunning = false;
+  isPaused = false;
+  loader.fail();
+  wasmState.textContent = 'Stuck';
+  wasmStatusText.textContent = 'Boot appears stuck';
+  btnPlay.disabled = btnPause.disabled = btnReset.disabled = true;
+}
+
+async function reloadStuckBoot() {
+  if (!bootStalled || bootRetrying) return;
+  bootRetrying = true;
+  try {
+    await stashGameFile(stalledBootFile);
+    sessionStorage.setItem(RESUME_KEY, JSON.stringify({ name: stalledBootFile.name, boot: true }));
+    const retryUrl = new URL(location.href);
+    retryUrl.searchParams.delete('bootTimeoutMs');
+    history.replaceState(history.state, '', retryUrl);
+    location.reload();
+  } catch (err) {
+    bootRetrying = false;
+    romStatus.textContent = `Could not prepare the reload (${err.message}). Try Reload again, or return to the library and pick the title again.`;
+  }
+}
+window.addEventListener('nx-retry-boot', reloadStuckBoot);
+
 async function resumeDir() {
+  await resumeCleanup;
   const root = await navigator.storage.getDirectory();
   return root.getDirectoryHandle(RESUME_DIR, { create: true });
 }
@@ -1306,15 +1403,14 @@ async function stashGameFile(file, replace = false) {
 }
 
 async function resumeAfterCrash() {
-  if (!resume) {
-    // A normal page load: drop any game copy left from an earlier crash.
-    navigator.storage?.getDirectory?.().then(root => root.removeEntry(RESUME_DIR, { recursive: true })).catch(() => {});
-    return;
-  }
+  if (!resume) return;
   try {
     const file = await (await (await resumeDir()).getFileHandle(resume.name)).getFile();
     resumedGameFile = file;
-    if (resume.reset) {
+    if (resume.boot) {
+      recoveryStatus.textContent = `Retrying ${resume.name} after a stuck boot.`;
+      log(`Retrying ${resume.name} after a stuck boot.`, 'ui');
+    } else if (resume.reset) {
       log(`Resetting ${resume.name}.`, 'ui');
     } else if (resume.slot) {
       savesStatus.textContent = `Restarted from slot ${resume.slot}.`;

@@ -30,6 +30,82 @@ await assert.rejects(rebootGame(file, { ...actions, stash: async () => { throw n
 assert.deepEqual(calls, []);
 
 const appSource = await readFile(new URL('../web/app.js', import.meta.url), 'utf8');
+const exitSource = appSource.slice(appSource.indexOf('async function onGuestExit('), appSource.indexOf('\nfunction startLoop('));
+for (const mode of ['saved', 'empty', 'error']) {
+  const exitCalls = [];
+  const scope = {
+    bootWatchdog: { stop() {} },
+    stopSaveWatch: mode === 'empty' ? null : async options => {
+      assert.equal(options.flush, true);
+      exitCalls.push('save');
+      if (mode === 'error') throw new Error('storage blocked');
+    },
+    loader: { finish: () => exitCalls.push('finish') },
+    setRomStatus: text => { assert.match(text, /exited normally.*Back to library/); exitCalls.push('exited'); },
+    log: text => { assert.match(text, /storage blocked/); exitCalls.push('error'); },
+  };
+  await runInNewContext(`${exitSource}; onGuestExit();`, scope);
+  assert.equal(scope.stopSaveWatch, null);
+  assert.deepEqual(exitCalls, mode === 'empty' ? ['finish', 'exited']
+    : mode === 'error' ? ['finish', 'exited', 'save', 'error'] : ['finish', 'exited', 'save']);
+}
+const crashSource = appSource.slice(appSource.indexOf('const CRASH_OUTPUT ='), appSource.indexOf('// Frame counters'));
+const crashCalls = [];
+const checkCrash = runInNewContext(`${crashSource}; checkCrashOutput;`, {
+  isRomLoaded: true, crashed: false, ANSI_ESCAPE: /\x1b\[[0-9;]*m/g,
+  onCrash: reason => crashCalls.push(reason),
+});
+checkCrash('Kernel.SVC <Info> ExitProcess: Process 81 exiting');
+assert.equal(crashCalls.length, 0);
+checkCrash('Core.ARM <Critical> ExceptionRaised(exception = 0)');
+checkCrash('RuntimeError: unreachable');
+assert.equal(crashCalls.length, 2, 'genuine CPU faults and Wasm traps still invoke onCrash');
+const cleanupSource = appSource.slice(appSource.indexOf('const resumeCleanup ='), appSource.indexOf('\nconst CRASH_OUTPUT'));
+const resumeDirSource = appSource.slice(appSource.indexOf('async function resumeDir('), appSource.indexOf('\nasync function resumeAfterCrash('));
+for (const mode of ['normal', 'missing', 'resume', 'blocked']) {
+  let finishCleanup;
+  let cleanupDone = false;
+  let cleanups = 0;
+  let directories = 0;
+  let bytes;
+  const root = {
+    removeEntry: async () => {
+      cleanups++;
+      await new Promise(resolve => { finishCleanup = resolve; });
+      cleanupDone = true;
+      if (mode === 'missing') throw new Error('NotFoundError');
+    },
+    getDirectoryHandle: async (name, options) => {
+      assert.equal(name, 'crash-resume');
+      assert.equal(options.create, true);
+      assert.ok(cleanupDone || mode === 'resume', 'cleanup must settle before a stash creates its directory');
+      directories++;
+      return { getFileHandle: async (name, options) => {
+        if (!options?.create) throw new Error('NotFoundError');
+        return { createWritable: async () => new WritableStream({ write: chunk => { bytes = chunk; } }) };
+      } };
+    },
+  };
+  const scope = {
+    sessionReady: Promise.resolve(mode !== 'blocked'), resume: mode === 'resume' ? { name: 'hello.nro' } : null,
+    navigator: { storage: { getDirectory: async () => root } }, RESUME_DIR: 'crash-resume', resumedGameFile: null,
+  };
+  const actions = runInNewContext(`${cleanupSource}\n${resumeDirSource}; ({ stashGameFile, ready: resumeCleanup });`, scope);
+  if (mode === 'blocked') {
+    await actions.ready;
+    assert.equal(cleanups, 0, 'an unowned tab cannot delete another tab\'s recovery file');
+    continue;
+  }
+  const pendingStash = actions.stashGameFile(new File(['latest title'], 'hello.nro'));
+  await new Promise(resolve => setImmediate(resolve));
+  if (mode !== 'resume') {
+    assert.equal(directories, 0, 'an in-flight cleanup blocks stashing');
+    finishCleanup();
+  }
+  await pendingStash;
+  assert.equal(cleanups, mode === 'resume' ? 0 : 1, 'a resume must preserve its recovery file');
+  assert.equal(new TextDecoder().decode(bytes), 'latest title');
+}
 const stashSource = appSource.slice(appSource.indexOf('async function stashGameFile('), appSource.indexOf('\nfunction showSavePoint('));
 let generation = 0;
 let writes = 0;
@@ -59,6 +135,31 @@ const stash = runInNewContext(`${stashSource}; ({ stashGameFile, resumeAfterCras
   resumeDir: async () => ({ getFileHandle: async () => handle }),
   handleFile: async file => { resumedFile = file; }, log() {}, setRomStatus(message) { assert.fail(message); },
 });
+const retrySource = appSource.slice(appSource.indexOf('async function reloadStuckBoot('), appSource.indexOf("window.addEventListener('nx-retry-boot'"));
+for (const failed of [null, 'stash', 'marker']) {
+  const retries = [];
+  const originalUrl = 'http://localhost/?core=wasm-jit&bootTimeoutMs=1&tag=one&tag=two#player';
+  const historyState = { library: true };
+  const scope = {
+    URL,
+    bootStalled: true, bootRetrying: false, stalledBootFile: file, RESUME_KEY: 'eden-resume', romStatus: {},
+    stashGameFile: async selected => { assert.equal(selected, file); retries.push('stash'); if (failed === 'stash') throw new Error('quota'); },
+    sessionStorage: { setItem(key, value) { assert.equal(key, 'eden-resume'); assert.equal(JSON.parse(value).boot, true); retries.push('marker'); if (failed === 'marker') throw new Error('blocked'); } },
+    location: { href: originalUrl, reload: () => retries.push('reload') },
+    history: { state: historyState, replaceState(state, title, url) {
+      assert.equal(state, historyState);
+      assert.equal(title, '');
+      scope.location.href = String(url);
+    } },
+  };
+  const retry = runInNewContext(`${retrySource}; reloadStuckBoot;`, scope);
+  await retry();
+  assert.deepEqual(retries, failed === 'stash' ? ['stash'] : failed === 'marker' ? ['stash', 'marker'] : ['stash', 'marker', 'reload']);
+  assert.equal(scope.location.href, failed ? originalUrl : 'http://localhost/?core=wasm-jit&tag=one&tag=two#player',
+    'successful retry removes only the boot timeout override, preserving other parameters and hash');
+  if (failed) { assert.match(scope.romStatus.textContent, /Could not prepare the reload/); assert.equal(scope.bootRetrying, false); }
+  else { await retry(); assert.equal(retries.length, 3, 'a double click must not schedule two reloads'); }
+}
 await stash.resumeAfterCrash();
 for (const failed of ['preserve', 'mark']) {
   await assert.rejects(rebootGame(resumedFile, {

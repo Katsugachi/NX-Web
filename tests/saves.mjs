@@ -248,6 +248,26 @@ try {
   lifecycle.dispatchEvent(new Event('pagehide'));
   await settle();
   assert.equal(snapshot.has('sdmc/late.txt'), false);
+  for (const inFlight of [false, true]) {
+    healthy = true;
+    const stopExit = watchSaves(() => FS, () => healthy, () => {}, 2000, lifecycle);
+    sdContents.set('exit.txt', new Uint8Array([1]));
+    await poll();
+    sdContents.set('exit.txt', new Uint8Array([2]));
+    const pending = inFlight ? poll() : null;
+    sdContents.set('exit.txt', new Uint8Array([3]));
+    healthy = false;
+    await stopExit({ flush: true });
+    await pending;
+    assert.deepEqual(new Uint8Array(await snapshot.get('sdmc/exit.txt').arrayBuffer()), new Uint8Array([3]),
+      'normal exit persists changes after the last poll even when unhealthy or a store is in flight');
+    sdContents.set('exit.txt', new Uint8Array([4]));
+    await poll();
+    lifecycle.dispatchEvent(new Event('pagehide'));
+    await settle();
+    assert.deepEqual(new Uint8Array(await snapshot.get('sdmc/exit.txt').arrayBuffer()), new Uint8Array([3]),
+      'exit flush deactivates polling and removes lifecycle listeners');
+  }
   const stopClear = watchSaves(() => FS, () => true, () => {}, 10_000, lifecycle);
   lifecycle.dispatchEvent(new Event('pagehide'));
   await clearSaves(stopClear);
