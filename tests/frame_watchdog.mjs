@@ -79,4 +79,39 @@ const exited = createFrameWatchdog({ timeoutMs: 10, now: () => time,
 exited(2, 60, 1);
 time += 30_000;
 exited(6, 0, 1);
-console.log('Frame watchdog: stale FPS, long pause, first frame and legacy runtime OK');
+const liveFreezes = [];
+const live = createFrameWatchdog({ timeoutMs: 45_000, now: () => time,
+  onFreeze: text => liveFreezes.push(text) });
+live(2, 0, 0, [0, 0, 0, 0]);
+live(2, 60, 1, [1, 0, 0, 0]);
+for (let cycle = 2; cycle < 10; cycle++) {
+  time += 30_000;
+  live(2, 0, 1, [1, 0, cycle, 0]);
+}
+assert.equal(liveFreezes.length, 0, 'a synchronous load stays live while any guest core executes');
+time += 46_000;
+live(2, 60, 1, [1, 0, 9, 0]);
+live(2, 60, 1, [1, 0, 9, 0]);
+assert.equal(liveFreezes.length, 1, 'stale CPU counters and stale FPS cannot mask a hung worker');
+live(2, 0, 1, [1, 0, 10, 0]);
+time += 46_000;
+live(2, 0, 1, [1, 0, 10, 0]);
+assert.equal(liveFreezes.length, 2, 'CPU progress rearms freeze detection');
+for (const cycles of [undefined, null, [], [NaN, Infinity, -1], 'busy']) {
+  let frozen = false;
+  const invalid = createFrameWatchdog({ timeoutMs: 10, now: () => time,
+    onFreeze: () => { frozen = true; } });
+  invalid(2, 60, 1, cycles);
+  time += 11;
+  invalid(2, 60, 1, cycles);
+  assert.equal(frozen, true, 'missing or malformed liveness data retains frame-only detection');
+}
+let resetFreeze = false;
+const reset = createFrameWatchdog({ timeoutMs: 10, now: () => time,
+  onFreeze: () => { resetFreeze = true; } });
+reset(2, 60, 1, [100]);
+time += 11;
+reset(2, 60, 1, [0]);
+assert.equal(resetFreeze, true, 'a counter reset is not execution progress');
+assert.match(appSource, /watchFrames\(state, gameFps, runtimeStats\?\.frames, runtimeStats\?\.guestCycles\)/);
+console.log('Frame watchdog: stale FPS/CPU, live loading, missing/invalid counters, long pause, first frame and legacy runtime OK');

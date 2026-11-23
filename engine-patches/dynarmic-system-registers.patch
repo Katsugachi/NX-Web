@@ -1,0 +1,102 @@
+diff --git a/src/dynarmic/src/dynarmic/frontend/A64/translate/impl/system.cpp b/src/dynarmic/src/dynarmic/frontend/A64/translate/impl/system.cpp
+index c60fdc3ae0..61a2b79211 100644
+--- a/src/dynarmic/src/dynarmic/frontend/A64/translate/impl/system.cpp
++++ b/src/dynarmic/src/dynarmic/frontend/A64/translate/impl/system.cpp
+@@ -31,6 +31,8 @@ enum class SystemRegisterEncoding : u32 {
+     TPIDR_EL0 = 0b11'1101'011'010'0000,
+     // Read-Only Software Thread ID Register
+     TPIDRRO_EL0 = 0b11'1101'011'011'0000,
++    // SME Software Thread ID Register
++    TPIDR2_EL0 = 0b11'1101'011'101'0000,
+ };
+ 
+ bool TranslatorVisitor::HINT([[maybe_unused]] Imm<4> CRm, [[maybe_unused]] Imm<3> op2) {
+@@ -115,10 +117,15 @@ bool TranslatorVisitor::MSR_reg(Imm<1> o0, Imm<3> op1, Imm<4> CRn, Imm<4> CRm, I
+     case SystemRegisterEncoding::TPIDR_EL0:
+         ir.SetTPIDR(X(64, Rt));
+         return true;
++    case SystemRegisterEncoding::TPIDR2_EL0:
++        LOG_WARNING(Debug, "MSR op0=3 op1=3 CRn=13 CRm=0 op2=5 (TPIDR2_EL0): FEAT_SME is not implemented");
++        return UnallocatedEncoding();
+     default:
+         break;
+     }
+-    UNREACHABLE();
++    UNREACHABLE_MSG("MSR op0={} op1={} CRn={} CRm={} op2={}",
++                    2 + o0.ZeroExtend(), op1.ZeroExtend(), CRn.ZeroExtend(),
++                    CRm.ZeroExtend(), op2.ZeroExtend());
+ }
+ 
+ bool TranslatorVisitor::MRS(Imm<1> o0, Imm<3> op1, Imm<4> CRn, Imm<4> CRm, Imm<3> op2, Reg Rt) {
+@@ -157,8 +164,13 @@ bool TranslatorVisitor::MRS(Imm<1> o0, Imm<3> op1, Imm<4> CRn, Imm<4> CRm, Imm<3
+     case SystemRegisterEncoding::TPIDRRO_EL0:
+         X(64, Rt, ir.GetTPIDRRO());
+         return true;
++    case SystemRegisterEncoding::TPIDR2_EL0:
++        LOG_WARNING(Debug, "MRS op0=3 op1=3 CRn=13 CRm=0 op2=5 (TPIDR2_EL0): FEAT_SME is not implemented");
++        return UnallocatedEncoding();
+     }
+-    UNREACHABLE();
++    UNREACHABLE_MSG("MRS op0={} op1={} CRn={} CRm={} op2={}",
++                    2 + o0.ZeroExtend(), op1.ZeroExtend(), CRn.ZeroExtend(),
++                    CRm.ZeroExtend(), op2.ZeroExtend());
+ }
+ 
+ }  // namespace Dynarmic::A64
+diff --git a/src/dynarmic/tests/A64/a64.cpp b/src/dynarmic/tests/A64/a64.cpp
+index 0238bf0c72..22dee06c0b 100644
+--- a/src/dynarmic/tests/A64/a64.cpp
++++ b/src/dynarmic/tests/A64/a64.cpp
+@@ -18,6 +18,52 @@
+ using namespace Dynarmic;
+ using namespace oaknut::util;
+ 
++TEST_CASE("A64: TPIDR2_EL0 requires SME", "[a64][system-registers]") {
++    class ExceptionEnv final : public A64TestEnv {
++    public:
++        std::vector<std::pair<u64, A64::Exception>> exceptions;
++        void ExceptionRaised(u64 pc, A64::Exception exception) override {
++            exceptions.emplace_back(pc, exception);
++        }
++    };
++    for (const u32 instruction : {0xd53bd0a1U, 0xd51bd0a1U}) {
++        ExceptionEnv env;
++        A64::UserConfig config{};
++        config.callbacks = &env;
++        A64::Jit jit{config};
++        env.code_mem = {instruction, 0x14000000};
++        jit.SetRegister(1, 0x12345678);
++        jit.SetPC(0);
++        env.ticks_left = 1;
++        jit.Step();
++        REQUIRE(env.exceptions.size() == 1);
++        CHECK(env.exceptions[0].first == 0);
++        CHECK(env.exceptions[0].second == A64::Exception::UnallocatedEncoding);
++        CHECK(jit.GetRegister(1) == 0x12345678);
++    }
++}
++
++TEST_CASE("A64: guarded TPIDR2_EL0 can be compiled without executing it", "[a64][system-registers]") {
++    A64TestEnv env;
++    A64::UserConfig config{};
++    config.callbacks = &env;
++    A64::Jit jit{config};
++    env.code_mem = {
++        0xd2800000, // MOV X0, #0
++        0xb4000040, // CBZ X0, +8
++        0xd53bd0a1, // MRS X1, TPIDR2_EL0
++        0x91000442, // ADD X2, X2, #1
++        0x17fffffd, // B -12
++    };
++    jit.SetRegister(1, 42);
++    jit.SetRegister(2, 0);
++    jit.SetPC(0);
++    env.ticks_left = 1000;
++    jit.Run();
++    CHECK(jit.GetRegister(1) == 42);
++    CHECK(jit.GetRegister(2) > 0);
++}
++
+ TEST_CASE("A64: ADD", "[a64]") {
+     A64TestEnv env;
+     A64::UserConfig jit_user_config{};
